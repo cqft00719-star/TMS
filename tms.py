@@ -9,7 +9,7 @@ import uuid, io, base64
 HKT = timezone(timedelta(hours=8))
 def now_hk(): return datetime.datetime.now(HKT)
 def today_hk(): return now_hk().date()
-st.set_page_config(page_title="TMS V36 Only CargoDetail", layout="wide", page_icon="🚚")
+st.set_page_config(page_title="TMS V36 Fixed Only CargoDetail", layout="wide", page_icon="🚚")
 
 FEE_MAP = {"油費":"隧道費","過路費":"登記費","維修":"交倉附加費","隧道":"隧道費"}
 NEW_FEES = ["隧道費","登記費","停車費","交倉附加費","其他"]
@@ -31,13 +31,10 @@ def load_df(tab):
         vals=ws.get_all_values()
         if len(vals)<1: return pd.DataFrame()
         headers=[h.strip() for h in vals[0]]
-        clean=[f"{h}_{i}" if clean.count(h)>0 else (h if h!="" else f"COL_{i}") for i,h in enumerate(headers) for clean in [[]]][0]
-        # 簡化clean邏輯
-        headers=[h.strip() for h in vals[0]]
         clean=[]
         for i,h in enumerate(headers):
             if h=="": h=f"COL_{i}"
-            if clean.count(h)>0: h=f"{h}_{i}"
+            if h in clean: h=f"{h}_{i}"
             clean.append(h)
         rows=[]
         for r in vals[1:]:
@@ -125,7 +122,6 @@ def show_table(df, max_rows=200):
     st.markdown(f"<div style='overflow-x:auto'>{df2.head(max_rows).to_html(index=False, border=0)}</div>", unsafe_allow_html=True)
 
 def printable_order_html(job):
-    # V36: 已刪除 貨名Product + 總數量QTY，只留詳細明細
     html = f"""
     <div id="print-area" style="font-family: Arial, sans-serif; padding:20px; border:2px solid #000; max-width:800px; background:white;">
     <h2 style="text-align:center; margin:0;">🚚 運輸訂單 Transport Order</h2>
@@ -148,8 +144,8 @@ def printable_order_html(job):
     </table>
     <h3 style="margin:10px 0 5px;">📋 貨物資料 Cargo</h3>
     <table style="width:100%; border-collapse:collapse; font-size:14px;">
-    <tr><td style="border:1px solid #000; padding:6px; background:#eee; width:25%;">詳細明細 Cargo Detail</td><td style="border:1px solid #000; padding:6px;"><pre style="margin:0; white-space:pre-wrap; font-family:inherit; font-size:14px;">{job.get('CargoDetail','')}</pre></td></tr>
-    <tr><td style="border:1px solid #000; padding:6px; background:#eee;">備註 Notes</td><td style="border:1px solid #000; padding:6px;">{job.get('Notes','')}</td></tr>
+    <tr><td style="border:1px solid #000; padding:6px; background:#eee; width:25%;">詳細明細</td><td style="border:1px solid #000; padding:6px;"><pre style="margin:0; white-space:pre-wrap; font-family:inherit; font-size:14px;">{job.get('CargoDetail','')}</pre></td></tr>
+    <tr><td style="border:1px solid #000; padding:6px; background:#eee;">備註</td><td style="border:1px solid #000; padding:6px;">{job.get('Notes','')}</td></tr>
     </table>
     <br><table style="width:100%; font-size:12px;"><tr><td>司機簽收: ________________</td><td>客戶簽收: ________________</td><td>日期: {job.get('Date','')}</td></tr></table>
     </div>
@@ -159,10 +155,10 @@ def printable_order_html(job):
 
 if "user" not in st.session_state: st.session_state.user=None
 if not st.session_state.user:
-    st.title("TMS V36 登入")
+    st.title("TMS V36 Fixed 登入")
     df_u=load_df("Users")
     u=st.text_input("用戶名"); p=st.text_input("密碼",type="password")
-    if st.button("登入",type="primary", use_container_width=True, key="login_v36"):
+    if st.button("登入",type="primary", use_container_width=True, key="v36f_login"):
         m=df_u[(df_u["username"].astype(str).str.strip()==str(u).strip()) & (df_u["password"].astype(str).str.strip()==str(p).strip())]
         if not m.empty: st.session_state.user=m.iloc[0].to_dict(); st.rerun()
         else: st.error("帳號錯")
@@ -176,8 +172,8 @@ user=st.session_state.user
 role=str(user.get("role","driver")).lower()
 operator=user.get("username","")
 st.sidebar.title(f"👤 {user.get('name')} ({role})")
-if st.sidebar.button("登出", key="logout_v36"): st.session_state.user=None; st.cache_data.clear(); st.rerun()
-if st.sidebar.button("🔄 清除Cache", key="clear_v36"): st.cache_data.clear(); st.rerun()
+if st.sidebar.button("登出", key="v36f_logout"): st.session_state.user=None; st.cache_data.clear(); st.rerun()
+if st.sidebar.button("🔄 清除Cache", key="v36f_clear_cache"): st.cache_data.clear(); st.rerun()
 
 if role=="admin": tabs=st.tabs(["📊 Dashboard","📋 任務管理","📤 上傳Order","📸 上傳POD","💰 雜費","💵 每單費用","👥 用戶","🧹 維護"])
 elif role=="op": tabs=st.tabs(["📊 Dashboard","📋 任務管理","📤 上傳Order","📸 上傳POD","💰 雜費","💵 每單費用","🧹 維護"])
@@ -190,17 +186,17 @@ df_users=load_df("Users")
 with tabs[0]:
     st.subheader("📊 Dashboard")
     show_table(df_jobs.head(20))
-    if st.button("🔄 同步到OrderCosts", key="sync_dash_v36", type="primary"):
+    if st.button("🔄 同步到OrderCosts", key="v36f_sync_dash", type="primary"):
         cnt=sync_order_costs_sheet()
         st.success(f"已同步 {cnt}")
 
 task_idx=1 if role in ["admin","op"] else None
 if task_idx is not None:
     with tabs[task_idx]:
-        st.subheader("📋 任務管理 - Print已簡化")
+        st.subheader("📋 任務管理")
         if not df_jobs.empty:
             show_table(df_jobs.sort_values(by="JobID", ascending=False))
-            sel=st.selectbox("選JobID打印", df_jobs["JobID"].astype(str).tolist(), key="task_print_v36")
+            sel=st.selectbox("選JobID打印", df_jobs["JobID"].astype(str).tolist(), key="v36f_task_print_sel")
             if sel:
                 job=df_jobs[df_jobs["JobID"]==sel].iloc[0].to_dict()
                 html=printable_order_html(job)
@@ -210,26 +206,28 @@ if task_idx is not None:
 order_idx=2 if role in ["admin","op"] else None
 if order_idx is not None:
     with tabs[order_idx]:
-        st.subheader("📤 上傳Order V36 - 只保留詳細明細")
+        st.subheader("📤 上傳Order V36-Fix - 只保留詳細明細")
         tab_manual, tab_excel = st.tabs(["✍️ 手動建立", "📊 Excel批量"])
         ZONES=["港島","九龍","新界","離島","機場","中港","澳門","內地","其他"]
         with tab_manual:
             st.markdown("**📋 貨物建造器 - 入貨名+數量+UOM -> 添加到明細**")
             cb1,cb2,cb3=st.columns([3,1,1])
-            cb_product=cb1.text_input("貨名 Product Code", placeholder="FPCQHKGBP003", key="cb_prod_v36")
-            cb_qty=cb2.number_input("數量", min_value=1, value=40, step=1, key="cb_qty_v36")
-            cb_uom=cb3.selectbox("UOM", UOM_OPTIONS, index=6, key="cb_uom_v36")
+            cb_product=cb1.text_input("貨名 Product Code", placeholder="FPCQHKGBP003", key="v36f_cb_prod")
+            cb_qty=cb2.number_input("數量", min_value=1, value=40, step=1, key="v36f_cb_qty")
+            cb_uom=cb3.selectbox("UOM", UOM_OPTIONS, index=6, key="v36f_cb_uom")
             c_btn1,c_btn2,c_btn3=st.columns([1,1,2])
             with c_btn1:
-                if st.button("➕ 添加", key="add_v36", type="primary", use_container_width=True):
+                if st.button("➕ 添加", key="v36f_cb_add", type="primary", use_container_width=True):
                     if cb_product.strip():
                         line=f"{cb_product.strip()} {int(cb_qty)}{cb_uom}"
                         st.session_state.cargo_builder.append(line)
+                        st.toast(f"已添加 {line}")
                     else:
                         st.error("貨名不能空")
             with c_btn2:
-                if st.button("🗑️ 清空", key="clear_v36", use_container_width=True):
+                if st.button("🗑️ 清空", key="v36f_cb_clear", use_container_width=True):
                     st.session_state.cargo_builder=[]
+                    st.toast("已清空")
             with c_btn3:
                 if st.session_state.cargo_builder:
                     st.success(" | ".join(st.session_state.cargo_builder))
@@ -237,12 +235,12 @@ if order_idx is not None:
                     st.write("明細: (空) - 例如 FPCQHKGBP003 40罐")
 
             st.divider()
-            with st.form("manual_v36", clear_on_submit=False):
+            with st.form("v36f_manual_form", clear_on_submit=False):
                 st.markdown("**客戶 & Internal**")
                 c1,c2,c3=st.columns([2,1,1])
                 client=c1.text_input("客戶 Client*")
                 internal_no=c2.text_input("Internal 單號#")
-                zone=c3.selectbox("邊區Zone*", ZONES + ["自定"], index=1, key="zone_v36")
+                zone=c3.selectbox("邊區Zone*", ZONES + ["自定"], index=1, key="v36f_zone")
                 zone_custom=st.text_input("自定邊區") if zone=="自定" else ""
                 final_zone=zone_custom if zone=="自定" else zone
 
@@ -264,7 +262,7 @@ if order_idx is not None:
                 to_contact=c_to_c.text_input("終點聯絡人")
                 to_phone=c_to_p.text_input("終點電話")
 
-                st.markdown("**📋 最終貨物明細 (可直接改)**")
+                st.markdown("**📋 最終貨物明細**")
                 auto_detail = "\n".join(st.session_state.cargo_builder)
                 cargo_detail=st.text_area("詳細 Cargo Detail*", value=auto_detail, height=120, placeholder="FPCQHKGBP003 40罐\nFPCQHKGBP001 20罐\nFPCQHKBA001 15袋")
                 notes=st.text_input("備註 Notes")
@@ -273,7 +271,6 @@ if order_idx is not None:
                 if submitted:
                     if client.strip() and from_loc.strip() and to_loc.strip() and cargo_detail.strip():
                         jid=f"JOB-{now_hk().strftime('%m%d%H%M')}-{str(uuid.uuid4())[:4].upper()}"
-                        # QTY/ProductName 自動從明細提取，唔再需要用戶入
                         append_row_by_header("Jobs",{"JobID":jid,"Date":str(date),"Client":client,"Zone":final_zone,"From":from_loc,"From_Contact":from_contact,"From_Phone":from_phone,"PickupTime":pickup_time,"To":to_loc,"To_Contact":to_contact,"To_Phone":to_phone,"DeliveryTime":delivery_time,"Driver":"","Status":"Pending","ProductName":"","QTY":"0","UOM":"","CargoDetail":cargo_detail,"InternalNo":internal_no,"Notes":notes,"CreatedBy":operator,"CreatedAt_HKT":now_hk().strftime("%Y-%m-%d %H:%M:%S HKT")})
                         sync_order_costs_sheet()
                         job_dict={"JobID":jid,"Date":str(date),"Client":client,"Zone":final_zone,"From":from_loc,"From_Contact":from_contact,"From_Phone":from_phone,"PickupTime":pickup_time,"To":to_loc,"To_Contact":to_contact,"To_Phone":to_phone,"DeliveryTime":delivery_time,"CargoDetail":cargo_detail,"InternalNo":internal_no,"Notes":notes}
@@ -295,15 +292,15 @@ if order_idx is not None:
             template_df=pd.DataFrame(columns=["Date(預計送貨)","Client","Zone","From","From_Contact","From_Phone","PickupTime","To","To_Contact","To_Phone","DeliveryTime","CargoDetail","InternalNo","Notes"])
             template_df.loc[0]=[str(today_hk()),"Sandy","九龍","HK Warehouse","John","91234567","10:00","KLN Shop","Mary","98765432","14:00-16:00","FPCQHKGBP003 40罐\nFPCQHKGBP001 20罐","INT-001",""]
             buf_template=io.BytesIO(); template_df.to_excel(buf_template, index=False, engine='openpyxl'); buf_template.seek(0)
-            st.download_button("📥 下載Template V36 (只有詳細明細)", data=buf_template, file_name="TMS_Order_Template_V36_OnlyDetail.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", type="primary", key="dl_v36")
-            excel_file=st.file_uploader("上傳Excel", type=["xlsx","xls"], key="up_v36")
+            st.download_button("📥 下載Template V36", data=buf_template, file_name="TMS_Order_Template_V36_OnlyDetail.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", type="primary", key="v36f_dl_template")
+            excel_file=st.file_uploader("上傳Excel", type=["xlsx","xls"], key="v36f_up_excel")
             if excel_file:
                 try:
                     df_excel=pd.read_excel(excel_file)
                     st.dataframe(df_excel.head(20))
                     df_excel.columns=[c.strip() for c in df_excel.columns]
                     col_map={c.lower():c for c in df_excel.columns}
-                    if st.button(f"✅ 批量建立 {len(df_excel)} 張", type="primary", key="batch_v36"):
+                    if st.button(f"✅ 批量建立 {len(df_excel)} 張", type="primary", key="v36f_batch"):
                         for _, row in df_excel.iterrows():
                             if str(row.get(col_map.get('client','Client'),"")).strip()=="": continue
                             jid=f"JOB-{now_hk().strftime('%m%d%H%M')}-{str(uuid.uuid4())[:4].upper()}"
@@ -318,11 +315,11 @@ with tabs[pod_idx]:
     my_pool=df_jobs if role in ["admin","op"] else df_jobs[df_jobs["Driver"].astype(str).str.strip()==operator] if not df_jobs.empty else df_jobs
     my_pool=my_pool.sort_values(by="JobID", ascending=False) if not my_pool.empty else my_pool
     if not my_pool.empty:
-        jid=st.selectbox("選擇JobID", my_pool["JobID"].astype(str).tolist(), key="pod_sel_v36")
+        jid=st.selectbox("選擇JobID", my_pool["JobID"].astype(str).tolist(), key="v36f_pod_sel")
         sel_info=df_jobs[df_jobs["JobID"]==jid].iloc[0].to_dict() if not df_jobs[df_jobs["JobID"]==jid].empty else {}
-        st.info(f"Internal: {sel_info.get('InternalNo','')} | 明細: {sel_info.get('CargoDetail','')} | 送貨時間: {sel_info.get('DeliveryTime','')}")
-        pod_files=st.file_uploader("拍照", type=["jpg","png","jpeg"], accept_multiple_files=True, key="pod_files_v36")
-        if pod_files and st.button(f"上傳 {len(pod_files)} 張", type="primary", key="up_pod_v36"):
+        st.info(f"Internal: {sel_info.get('InternalNo','')} | 明細: {sel_info.get('CargoDetail','')} | 送貨: {sel_info.get('DeliveryTime','')}")
+        pod_files=st.file_uploader("拍照", type=["jpg","png","jpeg"], accept_multiple_files=True, key="v36f_pod_files")
+        if pod_files and st.button(f"上傳 {len(pod_files)} 張", type="primary", key="v36f_up_pod"):
             from PIL import Image
             for idx_file, pod_file in enumerate(pod_files):
                 try:
@@ -341,10 +338,10 @@ with tabs[pod_idx]:
 cost_idx=5 if role=="admin" else 5 if role=="op" else None
 if cost_idx is not None:
     with tabs[cost_idx]:
-        st.subheader("💵 每單費用 - V36 只有詳細明細")
+        st.subheader("💵 每單費用")
         if not df_jobs.empty:
             st.dataframe(df_jobs[["JobID","Date","DeliveryTime","InternalNo","Client","Zone","CargoDetail","Status"]].sort_values(by="JobID", ascending=False), use_container_width=True, height=400)
-        if st.button("🔄 同步到OrderCosts", key="sync_cost_v36", type="primary", use_container_width=True):
+        if st.button("🔄 同步到OrderCosts", key="v36f_sync_cost", type="primary", use_container_width=True):
             cnt=sync_order_costs_sheet()
             st.success(f"✅ 已同步 {cnt}")
 
@@ -358,7 +355,7 @@ if role=="driver":
         my=df_jobs[df_jobs["Driver"].astype(str).str.strip()==operator] if not df_jobs.empty else pd.DataFrame()
         show_table(my)
         if not my.empty:
-            sel=st.selectbox("選任務打印", my["JobID"].astype(str).tolist(), key="driver_print_v36")
+            sel=st.selectbox("選任務打印", my["JobID"].astype(str).tolist(), key="v36f_driver_print")
             if sel:
                 job=my[my["JobID"]==sel].iloc[0].to_dict()
                 html=printable_order_html(job)
