@@ -9,7 +9,7 @@ import uuid, io, base64
 HKT = timezone(timedelta(hours=8))
 def now_hk(): return datetime.datetime.now(HKT)
 def today_hk(): return now_hk().date()
-st.set_page_config(page_title="TMS V16", layout="wide", page_icon="🚚")
+st.set_page_config(page_title="TMS V17", layout="wide", page_icon="🚚")
 
 @st.cache_resource
 def get_client():
@@ -27,9 +27,18 @@ def load_df(tab):
     vals=ws.get_all_values()
     if len(vals)<1: return pd.DataFrame()
     headers=[h.strip() for h in vals[0]]
-    rows=[r[:len(headers)]+[""]*(len(headers)-len(r)) for r in vals[1:] if any(str(c).strip()!="" for c in r)]
-    df=pd.DataFrame(rows, columns=headers)
-    df=df.replace({"nan":"","None":"","#N/A":""})
+    # 濾走空header
+    clean_headers=[]
+    for i,h in enumerate(headers):
+        if h=="": h=f"COL_{i}"
+        clean_headers.append(h)
+    rows=[]
+    for r in vals[1:]:
+        if any(str(c).strip()!="" for c in r):
+            if len(r)<len(clean_headers): r=r+[""]*(len(clean_headers)-len(r))
+            rows.append(r[:len(clean_headers)])
+    df=pd.DataFrame(rows, columns=clean_headers)
+    df=df.replace({"nan":"","None":""})
     return df
 
 def append_rows(tab, rows):
@@ -50,20 +59,24 @@ def ensure_sheets():
     add("Expenses",["ExpenseID","Date","JobID","Driver","Type","Amount","Remark","CreatedAt_HKT"])
     add("Config",["Key","Value"],[["POD_Folder_ID",""]])
 
-# V16 關鍵修復：顯示前Drop POD_Image + 全部轉字串 + 避開PyArrow
-def safe_df(df):
-    if df.empty: return df
-    df2=df.drop(columns=["POD_Image","POD_Link"], errors="ignore").copy() # POD_Link都唔show喺表，改去下載區
-    # Job#排序先，再轉字串
-    if "JobID" in df2.columns:
-        try: df2=df2.sort_values(by="JobID", ascending=False)
+# V17 不用 st.dataframe，用HTML避開PyArrow
+def show_table(df, max_rows=100):
+    if df.empty:
+        st.info("無資料"); return
+    # 不顯示Base64欄
+    df_show=df.drop(columns=["POD_Image"], errors="ignore")
+    # 只顯示頭100行，驚太長
+    df_show=df_show.head(max_rows)
+    # Job#排序
+    if "JobID" in df_show.columns:
+        try: df_show=df_show.sort_values(by="JobID", ascending=False)
         except: pass
-    for c in df2.columns: df2[c]=df2[c].astype(str)
-    return df2
+    html=df_show.to_html(index=False, classes="table table-striped", border=0)
+    st.markdown(f"<div style='overflow-x:auto'>{html}</div>", unsafe_allow_html=True)
 
 if "user" not in st.session_state: st.session_state.user=None
 if not st.session_state.user:
-    st.title("TMS V16 登入")
+    st.title("TMS V17 登入")
     df_u=load_df("Users")
     u=st.text_input("用戶名"); p=st.text_input("密碼",type="password")
     if st.button("登入",type="primary", use_container_width=True):
@@ -90,37 +103,35 @@ if role=="admin":
     with tabs[0]:
         st.subheader("Dashboard")
         st.write(f"Jobs表讀到 {len(df_jobs)} 行")
-        if not df_jobs.empty:
-            st.dataframe(safe_df(df_jobs), use_container_width=True)
+        show_table(df_jobs)
 
 if role in ["admin","op"]:
     idx=1 if role=="admin" else 0
     with tabs[idx]:
-        st.subheader("📋 所有任務 - 已按Job#排序")
+        st.subheader("📋 所有任務 - 已按Job#排序 + 可下載")
         st.write(f"共 {len(df_jobs)} 張")
-        if not df_jobs.empty:
-            st.dataframe(safe_df(df_jobs), use_container_width=True, height=350)
-            st.divider()
-            st.write("**📸 POD下載區 - 文件名 Job#_POD_時間.jpg 排序**")
-            df_show=df_jobs.sort_values(by="JobID", ascending=False) if "JobID" in df_jobs.columns else df_jobs
-            for _, r in df_show.iterrows():
-                jid=str(r.get("JobID","")).strip()
-                if not jid: continue
-                b64img=str(r.get("POD_Image","")); link=str(r.get("POD_Link",""))
-                if b64img.startswith("data:") or link.startswith("http"):
-                    with st.container(border=True):
-                        c1,c2=st.columns([3,1])
-                        c1.markdown(f"**{jid}** | {r.get('Client','')} | {r.get('Status','')} | {r.get('PodTime_HKT','')}")
-                        if b64img.startswith("data:"):
-                            try:
-                                _, bdata=b64img.split(",",1); fb=base64.b64decode(bdata)
-                                c1.image(fb, width=250)
-                                safe_time=str(r.get('PodTime_HKT','')).replace(':','-').replace(' ','_')
-                                fname=f"{jid}_POD_{safe_time}.jpg"
-                                c2.download_button(f"⬇️ 下載 {fname}", fb, file_name=fname, mime="image/jpeg", key=f"dl_{jid}_{safe_time}", type="primary", use_container_width=True)
-                            except: pass
-                        elif link.startswith("http"):
-                            c2.link_button("🔗 查看Drive", link, use_container_width=True)
+        show_table(df_jobs, 200)
+        st.divider()
+        st.write("**📸 POD下載區 - 文件名 Job#_POD_時間.jpg**")
+        df_show=df_jobs.sort_values(by="JobID", ascending=False) if not df_jobs.empty and "JobID" in df_jobs.columns else df_jobs
+        for _, r in df_show.iterrows():
+            jid=str(r.get("JobID","")).strip()
+            if not jid: continue
+            b64img=str(r.get("POD_Image","")); link=str(r.get("POD_Link",""))
+            if b64img.startswith("data:") or link.startswith("http"):
+                with st.container(border=True):
+                    c1,c2=st.columns([3,1])
+                    c1.markdown(f"**{jid}** | {r.get('Client','')} | {r.get('Status','')} | {r.get('PodTime_HKT','')}")
+                    if b64img.startswith("data:"):
+                        try:
+                            _, bdata=b64img.split(",",1); fb=base64.b64decode(bdata)
+                            c1.image(fb, width=250)
+                            safe_time=str(r.get('PodTime_HKT','')).replace(':','-').replace(' ','_').replace('/','-')
+                            fname=f"{jid}_POD_{safe_time}.jpg"
+                            c2.download_button(f"⬇️ 下載 {fname}", fb, file_name=fname, mime="image/jpeg", key=f"dl_{jid}_{safe_time}", type="primary", use_container_width=True)
+                        except: pass
+                    elif link.startswith("http"):
+                        c2.link_button("🔗 查看", link, use_container_width=True)
 
 if role in ["admin","op"]:
     idx=2 if role=="admin" else 1
@@ -134,11 +145,11 @@ if role in ["admin","op"]:
                 if client.strip():
                     jid=f"JOB-{now_hk().strftime('%m%d%H%M')}-{str(uuid.uuid4())[:4].upper()}"
                     append_row("Jobs",[jid,str(date),client,from_loc,to_loc,"","Pending",str(qty),notes,operator,now_hk().strftime("%Y-%m-%d %H:%M:%S HKT"),"","",""])
-                    st.success(jid); st.rerun()
+                    st.success(f"已建立 {jid}"); st.rerun()
 
 if role=="driver":
     with tabs[0]:
-        st.subheader("🟢 可接任務池")
+        st.subheader("🟢 可接任務池 V17")
         if df_jobs.empty: st.info("暫無")
         else:
             def is_pending(s): return str(s).strip().lower()=="pending"
@@ -148,7 +159,7 @@ if role=="driver":
             avail=df_jobs[mask_p | mask_e].copy()
             avail=avail[~avail["Status"].astype(str).str.lower().isin(["delivered","completed"])] if not avail.empty else avail
             st.success(f"可接：{len(avail)} 張 - 已按Job#排序")
-            st.dataframe(safe_df(avail), use_container_width=True)
+            show_table(avail, 200)
             for _, row in avail.iterrows():
                 jid=row["JobID"]
                 with st.container(border=True):
@@ -163,10 +174,10 @@ if role=="driver":
     with tabs[1]:
         st.subheader("🚚 我的任務")
         my_jobs=df_jobs[df_jobs["Driver"].astype(str).str.strip()==operator] if not df_jobs.empty else pd.DataFrame()
-        st.dataframe(safe_df(my_jobs), use_container_width=True)
+        show_table(my_jobs, 200)
 
 with tabs[3 if role=="admin" else 2 if role=="op" else 2]:
-    st.subheader("📸 上傳POD - Job# Prefix")
+    st.subheader("📸 上傳POD - Job# Prefix 可下載")
     my_pool=df_jobs if role in ["admin","op"] else df_jobs[df_jobs["Driver"].astype(str).str.strip()==operator] if not df_jobs.empty else pd.DataFrame()
     my_pool=my_pool.sort_values(by="JobID", ascending=False) if not my_pool.empty else my_pool
     if my_pool.empty: st.info("無任務")
@@ -187,6 +198,10 @@ with tabs[3 if role=="admin" else 2 if role=="op" else 2]:
             st.download_button(f"⬇️ 下載 {save_name}", fb, file_name=save_name, mime="image/jpeg", type="primary")
 
 with tabs[4 if role=="admin" else 3 if role=="op" else 3]:
-    st.subheader("💰 雜費"); st.dataframe(safe_df(load_df("Expenses")), use_container_width=True)
+    st.subheader("💰 雜費")
+    show_table(load_df("Expenses"))
+
 if role=="admin":
-    with tabs[5]: st.subheader("用戶"); st.dataframe(safe_df(load_df("Users")), use_container_width=True)
+    with tabs[5]:
+        st.subheader("用戶")
+        show_table(load_df("Users"))
