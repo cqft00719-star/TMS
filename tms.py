@@ -71,7 +71,7 @@ def ensure_sheets():
     add("Expenses",["ExpenseID","Date","JobID","Driver","Type","Amount","Remark","CreatedAt_HKT"])
     add("Config",["Key","Value"],[["POD_Folder_ID",""]])
     # V31 新加 OrderCosts
-    add("OrderCosts",["JobID","Date","Client","Zone","From","To","Driver","Status","QTY","油費","過路費","停車費","維修","其他","TotalExpense","LastSync_HKT"])
+    add("OrderCosts",["JobID","Date","Client","Zone","From","To","Driver","Status","QTY","隧道","登記費","停車費","交倉附加費","其他","TotalExpense","LastSync_HKT"])
     try:
         ws=sh.worksheet("Jobs")
         headers=[h.strip() for h in ws.row_values(1)]
@@ -98,11 +98,11 @@ def sync_order_costs_sheet():
         else:
             df_cost["TotalExpense"]=0
         df_cost["TotalExpense"]=df_cost["TotalExpense"].fillna(0)
-        for t in ["油費","過路費","停車費","維修","其他"]:
+        for t in ["隧道","登記費","停車費","交倉附加費","其他"]:
             if t not in df_cost.columns: df_cost[t]=0
             df_cost[t]=df_cost[t].fillna(0)
 
-        display_cols=["JobID","Date","Client","Zone","From","To","Driver","Status","QTY","油費","過路費","停車費","維修","其他","TotalExpense"]
+        display_cols=["JobID","Date","Client","Zone","From","To","Driver","Status","QTY","隧道","登記費","停車費","交倉附加費","其他","TotalExpense"]
         display_cols=[c for c in display_cols if c in df_cost.columns]
         df_out=df_cost[display_cols].sort_values(by="JobID", ascending=False) if "JobID" in df_cost.columns else df_cost[display_cols]
         df_out["LastSync_HKT"]=now_hk().strftime("%Y-%m-%d %H:%M:%S HKT")
@@ -111,7 +111,7 @@ def sync_order_costs_sheet():
         sh=get_sh()
         ws=sh.worksheet("OrderCosts")
         ws.clear()
-        headers=["JobID","Date","Client","Zone","From","To","Driver","Status","QTY","油費","過路費","停車費","維修","其他","TotalExpense","LastSync_HKT"]
+        headers=["JobID","Date","Client","Zone","From","To","Driver","Status","QTY","隧道","登記費","停車費","交倉附加費","其他","TotalExpense","LastSync_HKT"]
         ws.update('A1',[headers])
         if not df_out.empty:
             # 按header順序
@@ -325,7 +325,7 @@ if exp_idx is not None:
             e_date=st.date_input("日期", value=today_hk())
             e_job=st.selectbox("關聯JobID", [""] + (df_jobs["JobID"].astype(str).tolist() if not df_jobs.empty else []))
             e_driver=st.text_input("司機", value=operator)
-            e_type=st.selectbox("類型", ["油費","過路費","停車費","維修","其他"])
+            e_type=st.selectbox("類型", ["隧道","登記費","停車費","交倉附加費","其他"])
             e_amount=st.number_input("金額", min_value=0.0, step=1.0)
             e_remark=st.text_input("備註")
             if st.form_submit_button("新增雜費", type="primary"):
@@ -353,7 +353,7 @@ if cost_idx is not None:
             else:
                 df_cost["TotalExpense"]=0
             df_cost["TotalExpense"]=df_cost["TotalExpense"].fillna(0)
-            for t in ["油費","過路費","停車費","維修","其他"]:
+            for t in ["隧道","登記費","停車費","交倉附加費","其他"]:
                 if t not in df_cost.columns: df_cost[t]=0
                 df_cost[t]=df_cost[t].fillna(0)
 
@@ -370,7 +370,7 @@ if cost_idx is not None:
                 if sel_client: df_show=df_show[df_show["Client"].astype(str).isin(sel_client)]
                 if only_with_exp: df_show=df_show[df_show["TotalExpense"]>0]
 
-            display_cols=["JobID","Date","Client","Zone","From","To","Driver","Status","QTY","油費","過路費","停車費","維修","其他","TotalExpense"]
+            display_cols=["JobID","Date","Client","Zone","From","To","Driver","Status","QTY","隧道","登記費","停車費","交倉附加費","其他","TotalExpense"]
             display_cols=[c for c in display_cols if c in df_show.columns]
             df_display=df_show[display_cols].sort_values(by="JobID", ascending=False) if "JobID" in df_show.columns else df_show[display_cols]
             st.write(f"**共 {len(df_display)} 單，總雜費 {df_display['TotalExpense'].sum():.2f}**")
