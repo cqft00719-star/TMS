@@ -2,6 +2,8 @@ import streamlit as st
 import pandas as pd
 import gspread
 from google.oauth2.service_account import Credentials
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaIoBaseUpload
 import datetime
 from datetime import timezone, timedelta
 import uuid, io, base64
@@ -9,17 +11,21 @@ import uuid, io, base64
 HKT = timezone(timedelta(hours=8))
 def now_hk(): return datetime.datetime.now(HKT)
 def today_hk(): return now_hk().date()
-st.set_page_config(page_title="TMS V22", layout="wide", page_icon="🚚")
+st.set_page_config(page_title="TMS V23 Drive", layout="wide", page_icon="🚚")
 
 @st.cache_resource
 def get_client():
     scopes = ["https://www.googleapis.com/auth/spreadsheets","https://www.googleapis.com/auth/drive"]
     creds = Credentials.from_service_account_info(st.secrets["gcp_service_account"], scopes=scopes)
-    return gspread.authorize(creds), creds
+    return gspread.authorize(creds), creds, Credentials.from_service_account_info(st.secrets["gcp_service_account"], scopes=scopes)
 
 def get_sh():
-    client,_=get_client()
+    client,_,_=get_client()
     return client.open_by_key(st.secrets["connections"]["gsheets"]["spreadsheet"])
+
+def get_drive():
+    _,_,creds=get_client()
+    return build('drive','v3',credentials=creds)
 
 @st.cache_data(ttl=30)
 def load_df(tab):
@@ -38,13 +44,11 @@ def load_df(tab):
             if len(r)<len(clean): r=r+[""]*(len(clean)-len(r))
             rows.append(r[:len(clean)])
     df=pd.DataFrame(rows, columns=clean)
-    df=df.replace({"nan":"","None":""})
     return df
 
-def append_rows(tab, rows):
-    get_sh().worksheet(tab).append_rows(rows, value_input_option='USER_ENTERED')
+def append_row(tab,row):
+    get_sh().worksheet(tab).append_rows([row], value_input_option='USER_ENTERED')
     st.cache_data.clear()
-def append_row(tab,row): append_rows(tab,[row])
 
 def ensure_sheets():
     sh=get_sh()
@@ -59,31 +63,37 @@ def ensure_sheets():
     add("Expenses",["ExpenseID","Date","JobID","Driver","Type","Amount","Remark","CreatedAt_HKT"])
     add("Config",["Key","Value"],[["POD_Folder_ID",""]])
 
+def get_pod_folder_id():
+    try:
+        df=load_df("Config")
+        if not df.empty and "Key" in df.columns:
+            row=df[df["Key"]=="POD_Folder_ID"]
+            if not row.empty:
+                v=str(row.iloc[0]["Value"]).strip()
+                if "folders/" in v: v=v.split("folders/")[1].split("/")[0]
+                if len(v)>10: return v
+    except: pass
+    return None
+
+def upload_to_drive(file_bytes, filename, folder_id=None):
+    drive=get_drive()
+    file_metadata={'name':filename}
+    if folder_id: file_metadata['parents']=[folder_id]
+    media=MediaIoBaseUpload(io.BytesIO(file_bytes), mimetype='image/jpeg', resumable=True)
+    file=drive.files().create(body=file_metadata, media_body=media, fields='id, webViewLink').execute()
+    # 公開可讀
+    try:
+        drive.permissions().create(fileId=file['id'], body={'type':'anyone','role':'reader'}).execute()
+    except: pass
+    return file.get('webViewLink'), file.get('id')
+
 def find_pod_col(df):
     for col in df.columns:
         if df[col].astype(str).str.contains("data:image", na=False).any(): return col
-    for col in df.columns:
-        if df[col].astype(str).str.len().max()>1000: return col
-    return None
-def find_link_col(df):
-    for col in df.columns:
-        if "LINK" in col.upper(): return col
+        if "IMAGE" in col.upper(): return col
     return None
 
-def safe_b64_decode(b64_str):
-    # V22 終極修復：被切斷的 48977 問題
-    s = str(b64_str).strip()
-    if "," in s:
-        s = s.split(",",1)[1]
-    s = s.replace("\n","").replace("\r","").replace(" ","")
-    # 只保留合法Base64字元
-    # 切到4的倍數，48977 %4=1 -> 切到48976就解到
-    s = s[: len(s)//4*4 ]
-    if len(s) == 0:
-        raise ValueError("empty after trim")
-    return base64.b64decode(s)
-
-def show_table(df, max_rows=100):
+def show_table(df):
     if df.empty:
         st.info("無資料"); return
     pod_col=find_pod_col(df)
@@ -91,13 +101,12 @@ def show_table(df, max_rows=100):
     if "JobID" in df_show.columns:
         try: df_show=df_show.sort_values(by="JobID", ascending=False)
         except: pass
-    df_show=df_show.head(max_rows)
-    html=df_show.to_html(index=False, border=0)
+    html=df_show.head(200).to_html(index=False, border=0)
     st.markdown(f"<div style='overflow-x:auto'>{html}</div>", unsafe_allow_html=True)
 
 if "user" not in st.session_state: st.session_state.user=None
 if not st.session_state.user:
-    st.title("TMS V22 登入")
+    st.title("TMS V23 登入")
     df_u=load_df("Users")
     u=st.text_input("用戶名"); p=st.text_input("密碼",type="password")
     if st.button("登入",type="primary", use_container_width=True):
@@ -113,6 +122,9 @@ operator=user.get("username","")
 st.sidebar.title(f"👤 {user.get('name')} ({role})")
 if st.sidebar.button("登出"): st.session_state.user=None; st.cache_data.clear(); st.rerun()
 if st.sidebar.button("🔄 清除Cache刷新"): st.cache_data.clear(); st.rerun()
+folder_id=get_pod_folder_id()
+if folder_id: st.sidebar.caption(f"Drive Folder: {folder_id[:15]}...")
+else: st.sidebar.warning("未設定POD_Folder_ID，去Config填Drive Folder ID")
 
 if role=="admin": tabs=st.tabs(["📊 Dashboard","📋 任務管理","📤 上傳Order","📸 上傳POD","💰 雜費","👥 用戶"])
 elif role=="op": tabs=st.tabs(["📋 任務管理","📤 上傳Order","📸 上傳POD","💰 雜費"])
@@ -120,138 +132,97 @@ else: tabs=st.tabs(["🟢 可接任務池","🚚 我的任務","📸 上傳POD",
 
 df_jobs=load_df("Jobs")
 
-if role=="admin":
-    with tabs[0]:
-        st.subheader("Dashboard")
-        st.write(f"Jobs表 {len(df_jobs)} 行，POD欄={find_pod_col(df_jobs)}")
-        show_table(df_jobs)
-
 if role in ["admin","op"]:
     idx=1 if role=="admin" else 0
     with tabs[idx]:
-        st.subheader("📋 所有任務 - Job#排序")
-        st.write(f"共 {len(df_jobs)} 張")
-        show_table(df_jobs, 200)
+        st.subheader("📋 所有任務")
+        st.write(f"共 {len(df_jobs)} 張 - 已按Job#排序")
+        show_table(df_jobs)
         st.divider()
-        st.subheader("📸 POD下載區 - 文件名 Job#_POD_時間.jpg (已按Job#排序)")
-        pod_col=find_pod_col(df_jobs)
-        link_col=find_link_col(df_jobs)
-        df_show=df_jobs.sort_values(by="JobID", ascending=False) if "JobID" in df_jobs.columns else df_jobs
+        st.subheader("📸 POD下載區 - Job#_POD_時間.jpg (Drive版，永久有效)")
+        df_show=df_jobs.sort_values(by="JobID", ascending=False) if not df_jobs.empty and "JobID" in df_jobs.columns else df_jobs
         found=False
         for _, r in df_show.iterrows():
             jid=str(r.get("JobID","")).strip()
             if not jid: continue
-            b64img=""
-            if pod_col and pod_col in r:
-                b64img=str(r.get(pod_col,""))
-            if len(b64img)<100:
-                for v in r.values:
-                    sv=str(v)
-                    if sv.startswith("data:image") and len(sv)>100:
-                        b64img=sv
-                        break
-            link_val=""
-            if link_col and link_col in r:
-                link_val=str(r.get(link_col,"")).strip()
+            link=str(r.get("POD_Link","") or r.get("COL_11","") or "").strip()
             pod_time=str(r.get("PodTime_HKT","") or r.get("COL_12","") or "").strip()
-            has_image=len(b64img)>100
-            has_link=link_val.startswith("http")
-            if has_image or has_link:
+            # 判斷是否Drive Link
+            if link.startswith("http"):
                 found=True
                 with st.container(border=True):
                     c1,c2=st.columns([3,1])
                     c1.markdown(f"**{jid}** | {r.get('Client','')} | {r.get('Status','')} | {pod_time}")
                     safe_time=pod_time.replace(":","-").replace(" ","_").replace("/","-") if pod_time else now_hk().strftime("%m%d_%H%M")
                     fname=f"{jid}_POD_{safe_time}.jpg"
-                    if has_image:
-                        try:
-                            fb=safe_b64_decode(b64img)
-                            c1.image(fb, width=350, caption=fname)
-                            c2.download_button(f"⬇️ 下載 {fname}", data=fb, file_name=fname, mime="image/jpeg", key=f"dl_{jid}_{safe_time}_{uuid.uuid4().hex[:4]}", type="primary", use_container_width=True)
-                        except Exception as e:
-                            c1.error(f"解碼失敗 {e} - 請用下面『重新上傳』")
-                    elif has_link:
-                        c2.link_button("🔗 查看", link_val, use_container_width=True)
+                    c1.write(f"Link: {link[:80]}...")
+                    c2.link_button(f"⬇️ 下載 {fname}", link, type="primary", use_container_width=True)
+            else:
+                # 舊Base64爛圖提示重新上傳
+                pod_col=find_pod_col(df_jobs)
+                b64=str(r.get(pod_col,"")) if pod_col else ""
+                if len(b64)>1000:
+                    with st.container(border=True):
+                        c1,c2=st.columns([3,1])
+                        c1.markdown(f"**{jid}** | 舊圖已損壞(被切斷) | {pod_time}")
+                        c1.error("舊Base64已損壞，請去『上傳POD』重新上傳一次，之後會自動存Drive")
+                        c2.write("⬇️ 需要重上傳")
         if not found:
-            st.info("暫無POD")
-
-if role in ["admin","op"]:
-    idx=2 if role=="admin" else 1
-    with tabs[idx]:
-        st.subheader("📤 上傳Order")
-        with st.form("manual", clear_on_submit=True):
-            client=st.text_input("客戶*"); date=st.date_input("日期", value=today_hk())
-            from_loc=st.text_input("起點"); to_loc=st.text_input("終點")
-            qty=st.number_input("數量", 1.0); notes=st.text_input("備註")
-            if st.form_submit_button("建立"):
-                if client.strip():
-                    jid=f"JOB-{now_hk().strftime('%m%d%H%M')}-{str(uuid.uuid4())[:4].upper()}"
-                    append_row("Jobs",[jid,str(date),client,from_loc,to_loc,"","Pending",str(qty),notes,operator,now_hk().strftime("%Y-%m-%d %H:%M:%S HKT"),"","",""])
-                    st.success(jid); st.rerun()
-
-if role=="driver":
-    with tabs[0]:
-        st.subheader("🟢 可接任務池 V22")
-        if df_jobs.empty: st.info("暫無")
-        else:
-            def is_pending(s): return str(s).strip().lower()=="pending"
-            def is_empty(d): return str(d).strip()=="" or str(d).strip().lower() in ["nan","none"]
-            mask_p=df_jobs["Status"].apply(is_pending) if "Status" in df_jobs.columns else pd.Series([False]*len(df_jobs))
-            mask_e=df_jobs["Driver"].apply(is_empty) if "Driver" in df_jobs.columns else pd.Series([False]*len(df_jobs))
-            avail=df_jobs[mask_p | mask_e].copy()
-            avail=avail[~avail["Status"].astype(str).str.lower().isin(["delivered","completed"])] if not avail.empty else avail
-            st.success(f"可接：{len(avail)} 張")
-            show_table(avail, 200)
-            for _, row in avail.iterrows():
-                jid=row["JobID"]
-                with st.container(border=True):
-                    c1,c2=st.columns([4,1])
-                    c1.markdown(f"**{jid}** | {row.get('Client','')} | {row.get('From','')}->{row.get('To','')}")
-                    if c2.button("搶此單", key=f"claim_{jid}", type="primary", use_container_width=True):
-                        ws=get_sh().worksheet("Jobs"); cell=ws.find(jid)
-                        if cell:
-                            curr=str(ws.cell(cell.row, 6).value or "").strip()
-                            if curr!="": st.error(f"已被 {curr} 搶")
-                            else: ws.update_cell(cell.row, 6, operator); ws.update_cell(cell.row, 7, "Accepted"); st.cache_data.clear(); st.rerun()
-    with tabs[1]:
-        st.subheader("🚚 我的任務")
-        my_jobs=df_jobs[df_jobs["Driver"].astype(str).str.strip()==operator] if not df_jobs.empty else pd.DataFrame()
-        show_table(my_jobs, 200)
+            st.info("暫無Drive POD，請去『上傳POD』上傳，新圖會自動出下載掣")
 
 with tabs[3 if role=="admin" else 2 if role=="op" else 2]:
-    st.subheader("📸 上傳POD - Job# Prefix 自動下載")
-    my_pool=df_jobs if role in ["admin","op"] else df_jobs[df_jobs["Driver"].astype(str).str.strip()==operator] if not df_jobs.empty else pd.DataFrame()
+    st.subheader("📸 上傳POD - V23 Drive版")
+    if not folder_id:
+        st.error("請先去Google Drive開一個Folder叫 TMS_POD，右鍵 -> 分享 -> 複製連結，Link入面folders/後面嗰段ID，貼去Sheets的Config表 POD_Folder_ID Value格，再按清除Cache刷新")
+        st.write("例如 https://drive.google.com/drive/folders/1AbCdeFgHiJkLmNoPqRsTuVwXyZ -> 1AbCdeFgHiJkLmNoPqRsTuVwXyZ")
+    my_pool=df_jobs if role in ["admin","op"] else df_jobs[df_jobs["Driver"].astype(str).str.strip()==operator] if not df_jobs.empty else df_jobs
     my_pool=my_pool.sort_values(by="JobID", ascending=False) if not my_pool.empty else my_pool
     if my_pool.empty: st.info("無任務")
     else:
-        jid=st.selectbox("選擇JobID (Job#排序)", my_pool["JobID"].astype(str).tolist())
-        pod_file=st.file_uploader("拍照", type=["jpg","png","jpeg"])
-        if pod_file: st.image(pod_file, width=300, caption=f"{jid}_POD_{pod_file.name}")
-        if pod_file and st.button("上傳POD", type="primary"):
-            from PIL import Image
-            img=Image.open(io.BytesIO(pod_file.getvalue()))
-            img.thumbnail((600,600))
-            buf=io.BytesIO()
-            img.save(buf, format="JPEG", quality=50, optimize=True)
-            fb=buf.getvalue()
-            b64=base64.b64encode(fb).decode()
-            data_url=f"data:image/jpeg;base64,{b64}"
-            save_name=f"{jid}_POD_{now_hk().strftime('%Y%m%d_%H%M')}.jpg"
-            ws=get_sh().worksheet("Jobs")
-            cell=ws.find(jid)
-            if cell:
-                ws.update_cell(cell.row, 12, "BASE64_SAVED")
-                ws.update_cell(cell.row, 13, now_hk().strftime("%Y-%m-%d %H:%M:%S HKT"))
-                ws.update_cell(cell.row, 7, "Delivered")
-                ws.update_cell(cell.row, 14, data_url)
-            st.cache_data.clear()
-            st.success(f"✅ {save_name} 已保存 長度{len(data_url)}")
-            st.download_button(f"⬇️ 立即下載 {save_name}", fb, file_name=save_name, mime="image/jpeg", type="primary")
+        jid=st.selectbox("選擇JobID", my_pool["JobID"].astype(str).tolist())
+        pod_file=st.file_uploader("拍照 / 選圖", type=["jpg","png","jpeg"])
+        if pod_file: st.image(pod_file, width=300, caption=f"{jid}_POD")
+        if pod_file and st.button("上傳到Drive", type="primary", disabled=not folder_id):
+            try:
+                from PIL import Image
+                img=Image.open(io.BytesIO(pod_file.getvalue()))
+                img.thumbnail((1600,1600))
+                buf=io.BytesIO(); img.save(buf, format="JPEG", quality=85, optimize=True)
+                fb=buf.getvalue()
+                safe_time=now_hk().strftime("%Y-%m-%d_%H%M%S")
+                fname=f"{jid}_POD_{safe_time}.jpg"
+                with st.spinner(f"上傳 {fname} 到Drive..."):
+                    link,fid=upload_to_drive(fb, fname, folder_id)
+                ws=get_sh().worksheet("Jobs"); cell=ws.find(jid)
+                if cell:
+                    ws.update_cell(cell.row, 12, link)
+                    ws.update_cell(cell.row, 13, now_hk().strftime("%Y-%m-%d %H:%M:%S HKT"))
+                    ws.update_cell(cell.row, 7, "Delivered")
+                    ws.update_cell(cell.row, 14, "DRIVE_SAVED")
+                st.cache_data.clear()
+                st.success(f"✅ 已上傳到Drive: {fname}")
+                st.link_button(f"⬇️ 立即下載 {fname}", link, type="primary")
+                st.write(link)
+            except Exception as e:
+                st.error(f"上傳失敗 {e}")
+                import traceback; st.code(traceback.format_exc())
 
-with tabs[4 if role=="admin" else 3 if role=="op" else 3]:
-    st.subheader("💰 雜費")
-    show_table(load_df("Expenses"))
+# 其他Tab簡化
 if role=="admin":
-    with tabs[5]:
-        st.subheader("用戶")
-        show_table(load_df("Users"))
+    with tabs[0]: st.subheader("Dashboard"); show_table(df_jobs)
+if role=="driver":
+    with tabs[0]:
+        st.subheader("🟢 可接任務池")
+        if not df_jobs.empty:
+            def is_pending(s): return str(s).strip().lower()=="pending"
+            def is_empty(d): return str(d).strip()==""
+            mask_p=df_jobs["Status"].apply(is_pending) if "Status" in df_jobs.columns else pd.Series([False]*len(df_jobs))
+            mask_e=df_jobs["Driver"].apply(is_empty) if "Driver" in df_jobs.columns else pd.Series([False]*len(df_jobs))
+            avail=df_jobs[mask_p | mask_e].copy()
+            show_table(avail)
+            for _, row in avail.iterrows():
+                jid=row["JobID"]
+                if st.button(f"搶 {jid}", key=f"claim_{jid}"):
+                    ws=get_sh().worksheet("Jobs"); cell=ws.find(jid)
+                    if cell: ws.update_cell(cell.row, 6, operator); ws.update_cell(cell.row, 7, "Accepted"); st.cache_data.clear(); st.rerun()
+    with tabs[1]: st.subheader("🚚 我的任務"); my=df_jobs[df_jobs["Driver"].astype(str).str.strip()==operator] if not df_jobs.empty else pd.DataFrame(); show_table(my)
