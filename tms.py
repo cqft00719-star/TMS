@@ -9,7 +9,7 @@ import uuid, io, base64, zipfile
 HKT = timezone(timedelta(hours=8))
 def now_hk(): return datetime.datetime.now(HKT)
 def today_hk(): return now_hk().date()
-st.set_page_config(page_title="TMS V30 Fix Excel No Garbled", layout="wide", page_icon="🚚")
+st.set_page_config(page_title="TMS V31 OrderCosts Sheet", layout="wide", page_icon="🚚")
 
 @st.cache_resource
 def get_client():
@@ -45,7 +45,6 @@ def load_df(tab):
 def append_rows(tab, rows):
     get_sh().worksheet(tab).append_rows(rows, value_input_option='USER_ENTERED')
     st.cache_data.clear()
-
 def append_row(tab,row): append_rows(tab,[row])
 
 def append_row_by_header(tab, data_dict):
@@ -71,6 +70,8 @@ def ensure_sheets():
     add("PODs",["POD_ID","JobID","FileName","Size","Base64_Image","CreatedBy","CreatedAt_HKT","PodTime_HKT"])
     add("Expenses",["ExpenseID","Date","JobID","Driver","Type","Amount","Remark","CreatedAt_HKT"])
     add("Config",["Key","Value"],[["POD_Folder_ID",""]])
+    # V31 新加 OrderCosts
+    add("OrderCosts",["JobID","Date","Client","Zone","From","To","Driver","Status","QTY","油費","過路費","停車費","維修","其他","TotalExpense","LastSync_HKT"])
     try:
         ws=sh.worksheet("Jobs")
         headers=[h.strip() for h in ws.row_values(1)]
@@ -78,29 +79,68 @@ def ensure_sheets():
             ws.update('A1',[["JobID","Date","Client","Zone","From","To","Driver","Status","QTY","Notes","CreatedBy","CreatedAt_HKT","POD_Link","PodTime_HKT","POD_Image"]])
     except: pass
 
-def auto_fix_zone_misalignment():
-    """V30自動修復一次舊單錯位"""
+def sync_order_costs_sheet():
+    """將每單費用同步到 Google Sheet OrderCosts 分頁"""
+    try:
+        df_jobs=load_df("Jobs")
+        df_exp=load_df("Expenses")
+        if df_jobs.empty:
+            return 0
+        if "Zone" not in df_jobs.columns: df_jobs["Zone"]=""
+        df_cost=df_jobs.copy()
+        if not df_exp.empty and "JobID" in df_exp.columns and "Amount" in df_exp.columns:
+            df_exp["Amount_num"]=pd.to_numeric(df_exp["Amount"], errors="coerce").fillna(0)
+            exp_group=df_exp.groupby("JobID")["Amount_num"].sum().reset_index().rename(columns={"Amount_num":"TotalExpense"})
+            df_cost=df_cost.merge(exp_group, on="JobID", how="left")
+            if "Type" in df_exp.columns:
+                pivot=df_exp.pivot_table(index="JobID", columns="Type", values="Amount_num", aggfunc="sum", fill_value=0).reset_index()
+                df_cost=df_cost.merge(pivot, on="JobID", how="left")
+        else:
+            df_cost["TotalExpense"]=0
+        df_cost["TotalExpense"]=df_cost["TotalExpense"].fillna(0)
+        for t in ["油費","過路費","停車費","維修","其他"]:
+            if t not in df_cost.columns: df_cost[t]=0
+            df_cost[t]=df_cost[t].fillna(0)
+
+        display_cols=["JobID","Date","Client","Zone","From","To","Driver","Status","QTY","油費","過路費","停車費","維修","其他","TotalExpense"]
+        display_cols=[c for c in display_cols if c in df_cost.columns]
+        df_out=df_cost[display_cols].sort_values(by="JobID", ascending=False) if "JobID" in df_cost.columns else df_cost[display_cols]
+        df_out["LastSync_HKT"]=now_hk().strftime("%Y-%m-%d %H:%M:%S HKT")
+
+        # 寫入 OrderCosts
+        sh=get_sh()
+        ws=sh.worksheet("OrderCosts")
+        ws.clear()
+        headers=["JobID","Date","Client","Zone","From","To","Driver","Status","QTY","油費","過路費","停車費","維修","其他","TotalExpense","LastSync_HKT"]
+        ws.update('A1',[headers])
+        if not df_out.empty:
+            # 按header順序
+            rows=[]
+            for _, r in df_out.iterrows():
+                row=[str(r.get(h,"")) for h in headers]
+                rows.append(row)
+            ws.append_rows(rows, value_input_option='USER_ENTERED')
+        return len(df_out)
+    except Exception as e:
+        st.error(f"同步OrderCosts失敗: {e}")
+        return 0
+
+def auto_fix_zone():
     try:
         ws=get_sh().worksheet("Jobs")
         all_vals=ws.get_all_values()
         if len(all_vals)<2: return
         headers=all_vals[0]
-        fixed=0
-        new_rows=[]
+        new_rows=[]; fixed=0
         for r in all_vals[1:]:
-            if len(r)<8: new_rows.append(r); continue
-            # 錯位特徵: Zone欄係2/21C, To欄係司機名
             if len(r)>=7 and (r[3] in ["2","21C"] or (len(r)>5 and r[5] in ["Mo","Kit","John"] and r[3] not in ["港島","九龍","新界","離島","機場","中港","澳門","內地","其他"])):
                 old_from=r[3]; old_to=r[4]; old_driver=r[5]; old_status=r[6]; old_qty=r[7] if len(r)>7 else ""; old_notes=r[8] if len(r)>8 else ""
                 new_r=[r[0],r[1],r[2],"",old_from,old_to,old_driver,old_status,old_qty,old_notes] + r[9:]
-                new_rows.append(new_r)
-                fixed+=1
+                new_rows.append(new_r); fixed+=1
             else:
                 new_rows.append(r)
         if fixed>0:
-            ws.clear()
-            ws.update('A1',[headers])
-            ws.append_rows(new_rows, value_input_option='USER_ENTERED')
+            ws.clear(); ws.update('A1',[headers]); ws.append_rows(new_rows, value_input_option='USER_ENTERED')
             st.cache_data.clear()
     except: pass
 
@@ -133,7 +173,7 @@ def show_table(df, max_rows=200):
 
 if "user" not in st.session_state: st.session_state.user=None
 if not st.session_state.user:
-    st.title("TMS V30 登入")
+    st.title("TMS V31 登入")
     df_u=load_df("Users")
     u=st.text_input("用戶名"); p=st.text_input("密碼",type="password")
     if st.button("登入",type="primary", use_container_width=True):
@@ -143,7 +183,7 @@ if not st.session_state.user:
     st.stop()
 
 ensure_sheets()
-auto_fix_zone_misalignment()
+auto_fix_zone()
 user=st.session_state.user
 role=str(user.get("role","driver")).lower()
 operator=user.get("username","")
@@ -170,11 +210,15 @@ with tabs[0]:
         if "Zone" in df_jobs.columns and df_jobs["Zone"].astype(str).str.strip().ne("").any():
             st.bar_chart(df_jobs["Zone"].astype(str).value_counts())
     show_table(df_jobs.head(20))
+    if st.button("🔄 同步每單費用到Google Sheet OrderCosts", type="primary"):
+        cnt=sync_order_costs_sheet()
+        st.success(f"已同步 {cnt} 單到 Google Sheet 分頁 OrderCosts")
+        st.cache_data.clear()
 
 task_idx=1 if role in ["admin","op"] else None
 if task_idx is not None:
     with tabs[task_idx]:
-        st.subheader("📋 任務管理 - Filter按Status/Zone下載POD")
+        st.subheader("📋 任務管理")
         if not df_jobs.empty:
             with st.container(border=True):
                 f1,f2,f3=st.columns(3)
@@ -190,42 +234,16 @@ if task_idx is not None:
                 if sel_zone: df_filtered=df_filtered[df_filtered["Zone"].astype(str).isin(sel_zone)]
                 if sel_clients: df_filtered=df_filtered[df_filtered["Client"].astype(str).isin(sel_clients)]
                 df_filtered=df_filtered.sort_values(by="JobID", ascending=False) if "JobID" in df_filtered.columns else df_filtered
-                st.write(f"篩選後: {len(df_filtered)} / {len(df_jobs)}")
             show_table(df_filtered)
-            st.divider()
-            filtered_job_ids=set(df_filtered["JobID"].astype(str).tolist()) if "JobID" in df_filtered.columns else set()
-            all_pods=[]
-            pod_col=find_pod_col(df_jobs)
-            if pod_col:
-                for _, r in df_jobs.iterrows():
-                    jid=str(r.get("JobID","")).strip()
-                    if jid not in filtered_job_ids: continue
-                    b64=str(r.get(pod_col,""))
-                    if len(b64)>500:
-                        fb=safe_b64_decode(b64)
-                        if fb: all_pods.append({"JobID":jid, "FileName":f"{jid}_POD_OLD.jpg", "bytes":fb})
-            if not df_pods.empty:
-                for _, r in df_pods.iterrows():
-                    jid=str(r.get("JobID","")).strip()
-                    if jid not in filtered_job_ids: continue
-                    b64=str(r.get("Base64_Image","") or "")
-                    fb=safe_b64_decode(b64)
-                    if fb and jid: all_pods.append({"JobID":jid, "FileName":str(r.get("FileName","")), "bytes":fb})
-            if all_pods:
-                zip_all_buf=io.BytesIO()
-                with zipfile.ZipFile(zip_all_buf, 'w', zipfile.ZIP_DEFLATED) as zf:
-                    for p in all_pods: zf.writestr(p["FileName"], p["bytes"])
-                zip_all_buf.seek(0)
-                st.download_button(f"📦 打包下載篩選後ZIP ({len(all_pods)}張)", data=zip_all_buf, file_name=f"PODs_{now_hk().strftime('%Y%m%d_%H%M')}.zip", mime="application/zip", type="primary")
 
 order_idx=2 if role in ["admin","op"] else None
 if order_idx is not None:
     with tabs[order_idx]:
-        st.subheader("📤 上傳Order - 加邊區Zone")
-        tab_manual, tab_excel = st.tabs(["✍️ 手動建立", "📊 Excel批量"])
+        st.subheader("📤 上傳Order")
+        tab_manual, tab_excel = st.tabs(["✍️ 手動", "📊 Excel批量"])
         ZONES=["港島","九龍","新界","離島","機場","中港","澳門","內地","其他"]
         with tab_manual:
-            with st.form("manual_v30", clear_on_submit=True):
+            with st.form("manual_v31", clear_on_submit=True):
                 c1,c2=st.columns(2)
                 client=c1.text_input("客戶*"); zone=c2.selectbox("邊區Zone*", ZONES + ["自定"], index=1)
                 zone_custom=st.text_input("自定邊區") if zone=="自定" else ""
@@ -238,30 +256,32 @@ if order_idx is not None:
                     if client.strip():
                         jid=f"JOB-{now_hk().strftime('%m%d%H%M')}-{str(uuid.uuid4())[:4].upper()}"
                         append_row_by_header("Jobs",{"JobID":jid,"Date":str(date),"Client":client,"Zone":final_zone,"From":from_loc,"To":to_loc,"Driver":"","Status":"Pending","QTY":str(qty),"Notes":notes,"CreatedBy":operator,"CreatedAt_HKT":now_hk().strftime("%Y-%m-%d %H:%M:%S HKT")})
-                        st.success(f"{jid} Zone:{final_zone}"); st.rerun()
+                        sync_order_costs_sheet()
+                        st.success(f"{jid}"); st.rerun()
         with tab_excel:
             template_df=pd.DataFrame(columns=["Date","Client","Zone","From","To","QTY","Notes"])
             template_df.loc[0]=[str(today_hk()),"Sandy","九龍","HK","KLN","1","Sample"]
             buf_template=io.BytesIO(); template_df.to_excel(buf_template, index=False, engine='openpyxl'); buf_template.seek(0)
-            st.download_button("📥 下載Excel Template (有Zone欄)", data=buf_template, file_name="TMS_Order_Template_V30_Zone.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", type="primary")
-            excel_file=st.file_uploader("上傳已填好嘅Excel", type=["xlsx","xls"])
+            st.download_button("📥 下載Template", data=buf_template, file_name="TMS_Order_Template_V31_Zone.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", type="primary")
+            excel_file=st.file_uploader("上傳Excel", type=["xlsx","xls"])
             if excel_file:
                 try:
                     df_excel=pd.read_excel(excel_file)
                     st.dataframe(df_excel.head(20))
                     df_excel.columns=[c.strip() for c in df_excel.columns]
                     col_map={c.lower():c for c in df_excel.columns}
-                    if st.button(f"✅ 確認批量建立 {len(df_excel)} 張", type="primary"):
+                    if st.button(f"✅ 批量建立 {len(df_excel)} 張", type="primary"):
                         for _, row in df_excel.iterrows():
                             if str(row.get(col_map.get('client','Client'),"")).strip()=="": continue
                             jid=f"JOB-{now_hk().strftime('%m%d%H%M')}-{str(uuid.uuid4())[:4].upper()}"
                             append_row_by_header("Jobs",{"JobID":jid,"Date":str(row.get(col_map.get('date','Date'), str(today_hk()))),"Client":str(row.get(col_map.get('client','Client'), "")),"Zone":str(row.get(col_map.get('zone','Zone'), "其他")),"From":str(row.get(col_map.get('from','From'), "")),"To":str(row.get(col_map.get('to','To'), "")),"QTY":str(row.get(col_map.get('qty','QTY'), "1")),"Notes":str(row.get(col_map.get('notes','Notes'), "")),"Driver":"","Status":"Pending","CreatedBy":operator,"CreatedAt_HKT":now_hk().strftime("%Y-%m-%d %H:%M:%S HKT")})
-                        st.success("已批量建立"); st.rerun()
+                        sync_order_costs_sheet()
+                        st.success("已批量建立並同步到OrderCosts"); st.rerun()
                 except Exception as e: st.error(f"Excel失敗: {e}")
 
 pod_idx=3 if role=="admin" else 3 if role=="op" else 2
 with tabs[pod_idx]:
-    st.subheader("📸 上傳POD - 多張")
+    st.subheader("📸 上傳POD")
     my_pool=df_jobs if role in ["admin","op"] else df_jobs[df_jobs["Driver"].astype(str).str.strip()==operator] if not df_jobs.empty else df_jobs
     my_pool=my_pool.sort_values(by="JobID", ascending=False) if not my_pool.empty else my_pool
     if not my_pool.empty:
@@ -301,7 +321,7 @@ if exp_idx is not None:
         st.subheader("💰 雜費管理")
         show_table(df_exp)
         st.divider()
-        with st.form("add_expense_v30", clear_on_submit=True):
+        with st.form("add_expense_v31", clear_on_submit=True):
             e_date=st.date_input("日期", value=today_hk())
             e_job=st.selectbox("關聯JobID", [""] + (df_jobs["JobID"].astype(str).tolist() if not df_jobs.empty else []))
             e_driver=st.text_input("司機", value=operator)
@@ -311,13 +331,13 @@ if exp_idx is not None:
             if st.form_submit_button("新增雜費", type="primary"):
                 eid=f"EXP-{now_hk().strftime('%m%d%H%M')}-{uuid.uuid4().hex[:4].upper()}"
                 append_row("Expenses",[eid,str(e_date),e_job,e_driver,e_type,str(e_amount),e_remark,now_hk().strftime("%Y-%m-%d %H:%M:%S HKT")])
-                st.success(f"✅ {eid}"); st.rerun()
+                sync_order_costs_sheet()
+                st.success(f"✅ {eid} 已同步到OrderCosts"); st.rerun()
 
-# 每單費用 V30 - 無ExpenseCount，有Zone+每項雜費，Excel下載無亂碼
 cost_idx=5 if role=="admin" else 5 if role=="op" else None
 if cost_idx is not None:
     with tabs[cost_idx]:
-        st.subheader("💵 每一個Order的費用 - V30 已修復亂碼+取消ExpenseCount")
+        st.subheader("💵 每一個Order的費用 - V31 同步到Google Sheet")
         if df_jobs.empty:
             st.info("無Jobs")
         else:
@@ -356,22 +376,16 @@ if cost_idx is not None:
             st.write(f"**共 {len(df_display)} 單，總雜費 {df_display['TotalExpense'].sum():.2f}**")
             st.dataframe(df_display, use_container_width=True, height=500)
 
-            st.divider()
-            sel_job=st.selectbox("揀JobID睇明細", df_jobs["JobID"].astype(str).sort_values(ascending=False).tolist())
-            if sel_job:
-                job_info=df_jobs[df_jobs["JobID"]==sel_job]
-                show_table(job_info, 5)
-                exp_detail=df_exp[df_exp["JobID"]==sel_job] if not df_exp.empty and "JobID" in df_exp.columns else pd.DataFrame()
-                if not exp_detail.empty:
-                    st.dataframe(exp_detail, use_container_width=True)
-                else:
-                    st.info("暫無雜費")
-
-            # V30重點: Excel下載，解決亂碼
-            buf=io.BytesIO()
-            df_display.to_excel(buf, index=False, engine='openpyxl')
-            buf.seek(0)
-            st.download_button("📥 下載每單費用報表 Excel (無亂碼版)", data=buf, file_name=f"Cost_Per_Order_{now_hk().strftime('%Y%m%d')}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", type="primary")
+            col_sync,col_dl=st.columns(2)
+            with col_sync:
+                if st.button("🔄 同步到Google Sheet分頁 OrderCosts", type="primary", use_container_width=True):
+                    cnt=sync_order_costs_sheet()
+                    st.success(f"✅ 已同步 {cnt} 單到 Google Sheet，你而家去 Google Sheet 睇 OrderCosts 分頁就有")
+            with col_dl:
+                buf=io.BytesIO()
+                df_display.to_excel(buf, index=False, engine='openpyxl')
+                buf.seek(0)
+                st.download_button("📥 下載Excel (無亂碼)", data=buf, file_name=f"Cost_Per_Order_{now_hk().strftime('%Y%m%d')}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", type="primary", use_container_width=True)
 
 user_idx=6 if role=="admin" else None
 if user_idx is not None:
@@ -381,7 +395,7 @@ if user_idx is not None:
         if "password" in df_show.columns: df_show["password"]="******"
         st.markdown(f"<div style='overflow-x:auto'>{df_show.to_html(index=False, border=0)}</div>", unsafe_allow_html=True)
         st.divider()
-        with st.form("add_user_v30", clear_on_submit=True):
+        with st.form("add_user_v31", clear_on_submit=True):
             new_u=st.text_input("用戶名*"); new_p=st.text_input("密碼*")
             new_name=st.text_input("姓名"); new_role=st.selectbox("角色", ["admin","op","driver"])
             if st.form_submit_button("建立用戶", type="primary"):
@@ -393,13 +407,28 @@ maint_idx=7 if role=="admin" else 6 if role=="op" else None
 if maint_idx is not None:
     with tabs[maint_idx]:
         st.subheader("🧹 維護")
-        st.info("V30已自動修復Zone錯位，如仲有問題再手動撳")
-        if st.button("🔧 一鍵修復舊單Zone錯位", type="primary"):
+        c1,c2=st.columns(2)
+        with c1:
+            if st.button("🔄 同步每單費用到 OrderCosts Sheet", type="primary", use_container_width=True):
+                cnt=sync_order_costs_sheet()
+                st.success(f"已同步 {cnt} 單")
+        with c2:
+            if st.button("🗑️ 清理空表 Orders/Fees (保留Expenses)", use_container_width=True):
+                sh=get_sh()
+                try:
+                    for t in ["Orders","Fees"]:
+                        if t in [ws.title for ws in sh.worksheets()]:
+                            sh.del_worksheet(sh.worksheet(t))
+                    st.success("已刪除 Orders / Fees，Expenses保留")
+                    st.cache_data.clear()
+                except Exception as e:
+                    st.error(f"刪除失敗: {e}，你可以手動去Google Sheet刪除，唔影響系統")
+        st.divider()
+        if st.button("🔧 一鍵修復舊單Zone錯位"):
             ws=get_sh().worksheet("Jobs")
             all_vals=ws.get_all_values()
             headers=all_vals[0]
-            new_rows=[]
-            fixed=0
+            new_rows=[]; fixed=0
             for r in all_vals[1:]:
                 if len(r)>=7 and (r[3] in ["2","21C"] or (len(r)>5 and r[5] in ["Mo","Kit","John"])):
                     old_from=r[3]; old_to=r[4]; old_driver=r[5]; old_status=r[6]; old_qty=r[7] if len(r)>7 else ""; old_notes=r[8] if len(r)>8 else ""
@@ -422,7 +451,7 @@ if role=="driver":
             show_table(avail)
             for _, row in avail.iterrows():
                 jid=row["JobID"]
-                if st.button(f"搶 {jid}", key=f"claim_{jid}_v30", type="primary"):
+                if st.button(f"搶 {jid}", key=f"claim_{jid}_v31", type="primary"):
                     ws=get_sh().worksheet("Jobs")
                     headers=[h.strip() for h in ws.row_values(1)]
                     cell=ws.find(jid)
