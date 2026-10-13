@@ -9,7 +9,7 @@ import uuid, io, base64
 HKT = timezone(timedelta(hours=8))
 def now_hk(): return datetime.datetime.now(HKT)
 def today_hk(): return now_hk().date()
-st.set_page_config(page_title="TMS V20", layout="wide", page_icon="🚚")
+st.set_page_config(page_title="TMS V21", layout="wide", page_icon="🚚")
 
 @st.cache_resource
 def get_client():
@@ -67,24 +67,19 @@ def find_pod_col(df):
     for col in df.columns:
         if "IMAGE" in col.upper(): return col
     return None
+
 def find_link_col(df):
     for col in df.columns:
         if "LINK" in col.upper(): return col
     return None
 
 def safe_b64_decode(b64_str):
-    # V20 核心修復：切斷了的Base64補=，容錯解
-    try:
-        s=b64_str.strip()
-        if "," in s: s=s.split(",",1)[1]
-        s=s.replace("\n","").replace("\r","").replace(" ","")
-        # 補padding
-        missing = len(s) % 4
-        if missing!= 0:
-            s += "=" * (4 - missing)
-        return base64.b64decode(s, validate=False)
-    except Exception as e:
-        raise e
+    s=b64_str.strip()
+    if "," in s: s=s.split(",",1)[1]
+    s=s.replace("\n","").replace("\r","").replace(" ","")
+    missing=len(s)%4
+    if missing!=0: s+="="*(4-missing)
+    return base64.b64decode(s, validate=False)
 
 def show_table(df, max_rows=100):
     if df.empty:
@@ -100,7 +95,7 @@ def show_table(df, max_rows=100):
 
 if "user" not in st.session_state: st.session_state.user=None
 if not st.session_state.user:
-    st.title("TMS V20 登入")
+    st.title("TMS V21 登入")
     df_u=load_df("Users")
     u=st.text_input("用戶名"); p=st.text_input("密碼",type="password")
     if st.button("登入",type="primary", use_container_width=True):
@@ -145,13 +140,14 @@ if role in ["admin","op"]:
             jid=str(r.get("JobID","")).strip()
             if not jid: continue
             b64img=""
-            # 搵POD欄
             if pod_col and pod_col in r: b64img=str(r.get(pod_col,""))
             if len(b64img)<100:
                 for v in r.values:
                     if str(v).startswith("data:image") and len(str(v))>100:
                         b64img=str(v); break
-            link=str(r.get(link_col,"")).strip() if link_col else "")
+            link=""
+            if link_col and link_col in r:
+                link=str(r.get(link_col,"")).strip()
             pod_time=str(r.get("PodTime_HKT","") or r.get("COL_12","") or "").strip()
             has_image=len(b64img)>100
             has_link=link.startswith("http")
@@ -166,16 +162,9 @@ if role in ["admin","op"]:
                         try:
                             fb=safe_b64_decode(b64img)
                             c1.image(fb, width=350, caption=fname)
-                            c2.download_button(f"⬇️ 下載 {fname}", data=fb, file_name=fname, mime="image/jpeg", key=f"dl_{jid}_{safe_time}_v20_{uuid.uuid4().hex[:4]}", type="primary", use_container_width=True)
+                            c2.download_button(f"⬇️ 下載 {fname}", data=fb, file_name=fname, mime="image/jpeg", key=f"dl_{jid}_{safe_time}_{uuid.uuid4().hex[:4]}", type="primary", use_container_width=True)
                         except Exception as e:
-                            c1.warning(f"舊圖被截斷，嘗試修復中... {e}")
-                            # 即使切斷都嘗試顯示
-                            try:
-                                fb=safe_b64_decode(b64img)
-                                c1.image(fb, width=350)
-                                c2.download_button(f"⬇️ 下載(修復) {fname}", data=fb, file_name=fname, mime="image/jpeg", key=f"dl2_{jid}_{safe_time}_v20", type="primary", use_container_width=True)
-                            except Exception as e2:
-                                c1.error(f"解碼失敗 {e2}，請重新上傳此Job")
+                            c1.error(f"解碼失敗 {e} 請重新上傳")
                     elif has_link:
                         c2.link_button("🔗 查看", link, use_container_width=True)
         if not found:
@@ -197,7 +186,7 @@ if role in ["admin","op"]:
 
 if role=="driver":
     with tabs[0]:
-        st.subheader("🟢 可接任務池 V20")
+        st.subheader("🟢 可接任務池 V21")
         if df_jobs.empty: st.info("暫無")
         else:
             def is_pending(s): return str(s).strip().lower()=="pending"
@@ -225,7 +214,7 @@ if role=="driver":
         show_table(my_jobs, 200)
 
 with tabs[3 if role=="admin" else 2 if role=="op" else 2]:
-    st.subheader("📸 上傳POD - Job# Prefix 自動下載 (V20已壓縮，不再切斷)")
+    st.subheader("📸 上傳POD - Job# Prefix 自動下載 (V21已壓縮)")
     my_pool=df_jobs if role in ["admin","op"] else df_jobs[df_jobs["Driver"].astype(str).str.strip()==operator] if not df_jobs.empty else pd.DataFrame()
     my_pool=my_pool.sort_values(by="JobID", ascending=False) if not my_pool.empty else my_pool
     if my_pool.empty: st.info("無任務")
@@ -236,21 +225,18 @@ with tabs[3 if role=="admin" else 2 if role=="op" else 2]:
         if pod_file and st.button("上傳POD", type="primary"):
             from PIL import Image
             img=Image.open(io.BytesIO(pod_file.getvalue()))
-            # V20 壓細到800，quality 60，確保 <45k
             img.thumbnail((800,800))
             buf=io.BytesIO(); img.save(buf, format="JPEG", quality=60, optimize=True)
             fb=buf.getvalue(); b64=base64.b64encode(fb).decode(); data_url=f"data:image/jpeg;base64,{b64}"
             save_name=f"{jid}_POD_{now_hk().strftime('%Y%m%d_%H%M')}.jpg"
             ws=get_sh().worksheet("Jobs"); cell=ws.find(jid)
             if cell:
-                # 不再切斷，完整存
-                if len(data_url) > 49000:
-                    # 如果仲係太大，再壓
+                if len(data_url)>49000:
                     img.thumbnail((600,600))
                     buf=io.BytesIO(); img.save(buf, format="JPEG", quality=50, optimize=True)
                     fb=buf.getvalue(); b64=base64.b64encode(fb).decode(); data_url=f"data:image/jpeg;base64,{b64}"
                 ws.update_cell(cell.row, 12, "BASE64_SAVED"); ws.update_cell(cell.row, 13, now_hk().strftime("%Y-%m-%d %H:%M:%S HKT")); ws.update_cell(cell.row, 7, "Delivered"); ws.update_cell(cell.row, 14, data_url)
-            st.cache_data.clear(); st.success(f"✅ {save_name} 已保存 長度{len(data_url)}"); st.download_button(f"⬇️ 立即下載 {save_name}", fb, file_name=save_name, mime="image/jpeg", type="primary")
+            st.cache_data.clear(); st.success(f"✅ {save_name} 已保存"); st.download_button(f"⬇️ 立即下載 {save_name}", fb, file_name=save_name, mime="image/jpeg", type="primary")
 
 with tabs[4 if role=="admin" else 3 if role=="op" else 3]:
     st.subheader("💰 雜費"); show_table(load_df("Expenses"))
