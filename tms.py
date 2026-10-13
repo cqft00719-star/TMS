@@ -9,7 +9,7 @@ import uuid, io, base64
 HKT = timezone(timedelta(hours=8))
 def now_hk(): return datetime.datetime.now(HKT)
 def today_hk(): return now_hk().date()
-st.set_page_config(page_title="TMS V19", layout="wide", page_icon="🚚")
+st.set_page_config(page_title="TMS V20", layout="wide", page_icon="🚚")
 
 @st.cache_resource
 def get_client():
@@ -30,7 +30,6 @@ def load_df(tab):
     clean=[]
     for i,h in enumerate(headers):
         if h=="": h=f"COL_{i}"
-        # 去重
         if clean.count(h)>0: h=f"{h}_{i}"
         clean.append(h)
     rows=[]
@@ -60,35 +59,38 @@ def ensure_sheets():
     add("Expenses",["ExpenseID","Date","JobID","Driver","Type","Amount","Remark","CreatedAt_HKT"])
     add("Config",["Key","Value"],[["POD_Folder_ID",""]])
 
-# V19 自動搵POD欄
 def find_pod_col(df):
     for col in df.columns:
-        try:
-            # 只要有一個cell係data:image或長度>1000就當係POD
-            if df[col].astype(str).str.contains("data:image", na=False).any():
-                return col
-            if df[col].astype(str).str.len().max() > 1000:
-                return col
-        except: continue
-    # fallback
+        if df[col].astype(str).str.contains("data:image", na=False).any(): return col
     for col in df.columns:
-        if "IMAGE" in col.upper() or "POD" in col.upper() and "LINK" not in col.upper():
-            return col
+        if df[col].astype(str).str.len().max()>1000: return col
+    for col in df.columns:
+        if "IMAGE" in col.upper(): return col
     return None
-
 def find_link_col(df):
     for col in df.columns:
-        if "LINK" in col.upper():
-            return col
+        if "LINK" in col.upper(): return col
     return None
+
+def safe_b64_decode(b64_str):
+    # V20 核心修復：切斷了的Base64補=，容錯解
+    try:
+        s=b64_str.strip()
+        if "," in s: s=s.split(",",1)[1]
+        s=s.replace("\n","").replace("\r","").replace(" ","")
+        # 補padding
+        missing = len(s) % 4
+        if missing!= 0:
+            s += "=" * (4 - missing)
+        return base64.b64decode(s, validate=False)
+    except Exception as e:
+        raise e
 
 def show_table(df, max_rows=100):
     if df.empty:
         st.info("無資料"); return
-    # 顯示時唔show大圖欄
     pod_col=find_pod_col(df)
-    cols_to_drop=[pod_col] if pod_col else []
-    df_show=df.drop(columns=cols_to_drop, errors="ignore")
+    df_show=df.drop(columns=[pod_col], errors="ignore") if pod_col else df
     if "JobID" in df_show.columns:
         try: df_show=df_show.sort_values(by="JobID", ascending=False)
         except: pass
@@ -98,7 +100,7 @@ def show_table(df, max_rows=100):
 
 if "user" not in st.session_state: st.session_state.user=None
 if not st.session_state.user:
-    st.title("TMS V19 登入")
+    st.title("TMS V20 登入")
     df_u=load_df("Users")
     u=st.text_input("用戶名"); p=st.text_input("密碼",type="password")
     if st.button("登入",type="primary", use_container_width=True):
@@ -124,61 +126,60 @@ df_jobs=load_df("Jobs")
 if role=="admin":
     with tabs[0]:
         st.subheader("Dashboard")
-        st.write(f"Jobs表讀到 {len(df_jobs)} 行，POD欄自動偵測: {find_pod_col(df_jobs)}")
+        st.write(f"Jobs表 {len(df_jobs)} 行，POD欄={find_pod_col(df_jobs)}")
         show_table(df_jobs)
 
 if role in ["admin","op"]:
     idx=1 if role=="admin" else 0
     with tabs[idx]:
-        st.subheader("📋 所有任務 - Job#排序 + 可下載")
-        st.write(f"共 {len(df_jobs)} 張 | POD欄={find_pod_col(df_jobs)} | LINK欄={find_link_col(df_jobs)}")
+        st.subheader("📋 所有任務 - Job#排序")
+        st.write(f"共 {len(df_jobs)} 張")
         show_table(df_jobs, 200)
         st.divider()
         st.subheader("📸 POD下載區 - 文件名 Job#_POD_時間.jpg (已按Job#排序)")
-        if df_jobs.empty:
-            st.info("暫無任務")
-        else:
-            pod_col=find_pod_col(df_jobs)
-            link_col=find_link_col(df_jobs)
-            df_show=df_jobs.sort_values(by="JobID", ascending=False) if "JobID" in df_jobs.columns else df_jobs
-            found=False
-            for _, r in df_show.iterrows():
-                jid=str(r.get("JobID","")).strip()
-                if not jid: continue
-                b64img=str(r.get(pod_col,"")).strip() if pod_col and pod_col in r else ""
-                # 如果pod_col係COL_xx，都要試下
-                if len(b64img)<100:
-                    # 再掃成行搵data:image
-                    for v in r.values:
-                        if str(v).startswith("data:image") and len(str(v))>100:
-                            b64img=str(v); break
-                link=str(r.get(link_col,"")).strip() if link_col and link_col in r else ""
-                pod_time=str(r.get("PodTime_HKT","") or r.get("COL_12","") or "").strip()
-                has_image=len(b64img)>100
-                has_link=link.startswith("http")
-                if has_image or has_link:
-                    found=True
-                    with st.container(border=True):
-                        c1,c2=st.columns([3,1])
-                        c1.markdown(f"**{jid}** | {r.get('Client','')} | {r.get('Status','')} | {pod_time}")
-                        safe_time=pod_time.replace(':','-').replace(' ','_').replace('/','-') if pod_time else now_hk().strftime('%m%d_%H%M')
-                        fname=f"{jid}_POD_{safe_time}.jpg"
-                        if has_image:
+        pod_col=find_pod_col(df_jobs)
+        link_col=find_link_col(df_jobs)
+        df_show=df_jobs.sort_values(by="JobID", ascending=False) if "JobID" in df_jobs.columns else df_jobs
+        found=False
+        for _, r in df_show.iterrows():
+            jid=str(r.get("JobID","")).strip()
+            if not jid: continue
+            b64img=""
+            # 搵POD欄
+            if pod_col and pod_col in r: b64img=str(r.get(pod_col,""))
+            if len(b64img)<100:
+                for v in r.values:
+                    if str(v).startswith("data:image") and len(str(v))>100:
+                        b64img=str(v); break
+            link=str(r.get(link_col,"")).strip() if link_col else "")
+            pod_time=str(r.get("PodTime_HKT","") or r.get("COL_12","") or "").strip()
+            has_image=len(b64img)>100
+            has_link=link.startswith("http")
+            if has_image or has_link:
+                found=True
+                with st.container(border=True):
+                    c1,c2=st.columns([3,1])
+                    c1.markdown(f"**{jid}** | {r.get('Client','')} | {r.get('Status','')} | {pod_time}")
+                    safe_time=pod_time.replace(':','-').replace(' ','_').replace('/','-') if pod_time else now_hk().strftime('%m%d_%H%M')
+                    fname=f"{jid}_POD_{safe_time}.jpg"
+                    if has_image:
+                        try:
+                            fb=safe_b64_decode(b64img)
+                            c1.image(fb, width=350, caption=fname)
+                            c2.download_button(f"⬇️ 下載 {fname}", data=fb, file_name=fname, mime="image/jpeg", key=f"dl_{jid}_{safe_time}_v20_{uuid.uuid4().hex[:4]}", type="primary", use_container_width=True)
+                        except Exception as e:
+                            c1.warning(f"舊圖被截斷，嘗試修復中... {e}")
+                            # 即使切斷都嘗試顯示
                             try:
-                                bdata=b64img.split(",",1)[1] if "," in b64img else b64img
-                                fb=base64.b64decode(bdata)
-                                c1.image(fb, width=300, caption=fname)
-                                c2.download_button(f"⬇️ 下載 {fname}", data=fb, file_name=fname, mime="image/jpeg", key=f"dl_{jid}_{safe_time}_v19_{uuid.uuid4().hex[:4]}", type="primary", use_container_width=True)
-                            except Exception as e:
-                                c1.error(f"解碼失敗 {e}")
-                        elif has_link:
-                            c2.link_button("🔗 查看", link, use_container_width=True)
-            if not found:
-                st.error("仍然搵唔到POD，已列出每行長度供檢查")
-                for _, r in df_show.iterrows():
-                    pc=find_pod_col(df_jobs)
-                    l= len(str(r.get(pc,""))) if pc else 0
-                    st.write(f"{r.get('JobID')}: 偵測欄={pc} 長度={l} LINK={str(r.get(find_link_col(df_jobs) or '', ''))[:30]}")
+                                fb=safe_b64_decode(b64img)
+                                c1.image(fb, width=350)
+                                c2.download_button(f"⬇️ 下載(修復) {fname}", data=fb, file_name=fname, mime="image/jpeg", key=f"dl2_{jid}_{safe_time}_v20", type="primary", use_container_width=True)
+                            except Exception as e2:
+                                c1.error(f"解碼失敗 {e2}，請重新上傳此Job")
+                    elif has_link:
+                        c2.link_button("🔗 查看", link, use_container_width=True)
+        if not found:
+            st.info("暫無POD")
 
 if role in ["admin","op"]:
     idx=2 if role=="admin" else 1
@@ -196,7 +197,7 @@ if role in ["admin","op"]:
 
 if role=="driver":
     with tabs[0]:
-        st.subheader("🟢 可接任務池")
+        st.subheader("🟢 可接任務池 V20")
         if df_jobs.empty: st.info("暫無")
         else:
             def is_pending(s): return str(s).strip().lower()=="pending"
@@ -205,7 +206,7 @@ if role=="driver":
             mask_e=df_jobs["Driver"].apply(is_empty) if "Driver" in df_jobs.columns else pd.Series([False]*len(df_jobs))
             avail=df_jobs[mask_p | mask_e].copy()
             avail=avail[~avail["Status"].astype(str).str.lower().isin(["delivered","completed"])] if not avail.empty else avail
-            st.success(f"可接：{len(avail)} 張 - 已按Job#排序")
+            st.success(f"可接：{len(avail)} 張")
             show_table(avail, 200)
             for _, row in avail.iterrows():
                 jid=row["JobID"]
@@ -224,7 +225,7 @@ if role=="driver":
         show_table(my_jobs, 200)
 
 with tabs[3 if role=="admin" else 2 if role=="op" else 2]:
-    st.subheader("📸 上傳POD - Job# Prefix 自動下載")
+    st.subheader("📸 上傳POD - Job# Prefix 自動下載 (V20已壓縮，不再切斷)")
     my_pool=df_jobs if role in ["admin","op"] else df_jobs[df_jobs["Driver"].astype(str).str.strip()==operator] if not df_jobs.empty else pd.DataFrame()
     my_pool=my_pool.sort_values(by="JobID", ascending=False) if not my_pool.empty else my_pool
     if my_pool.empty: st.info("無任務")
@@ -234,14 +235,22 @@ with tabs[3 if role=="admin" else 2 if role=="op" else 2]:
         if pod_file: st.image(pod_file, width=300, caption=f"{jid}_POD_{pod_file.name}")
         if pod_file and st.button("上傳POD", type="primary"):
             from PIL import Image
-            img=Image.open(io.BytesIO(pod_file.getvalue())); img.thumbnail((1200,1200))
-            buf=io.BytesIO(); img.save(buf, format="JPEG", quality=80)
+            img=Image.open(io.BytesIO(pod_file.getvalue()))
+            # V20 壓細到800，quality 60，確保 <45k
+            img.thumbnail((800,800))
+            buf=io.BytesIO(); img.save(buf, format="JPEG", quality=60, optimize=True)
             fb=buf.getvalue(); b64=base64.b64encode(fb).decode(); data_url=f"data:image/jpeg;base64,{b64}"
             save_name=f"{jid}_POD_{now_hk().strftime('%Y%m%d_%H%M')}.jpg"
             ws=get_sh().worksheet("Jobs"); cell=ws.find(jid)
             if cell:
-                ws.update_cell(cell.row, 12, "BASE64_SAVED"); ws.update_cell(cell.row, 13, now_hk().strftime("%Y-%m-%d %H:%M:%S HKT")); ws.update_cell(cell.row, 7, "Delivered"); ws.update_cell(cell.row, 14, data_url[:49000])
-            st.cache_data.clear(); st.success(f"✅ {save_name} 已保存"); st.download_button(f"⬇️ 立即下載 {save_name}", fb, file_name=save_name, mime="image/jpeg", type="primary")
+                # 不再切斷，完整存
+                if len(data_url) > 49000:
+                    # 如果仲係太大，再壓
+                    img.thumbnail((600,600))
+                    buf=io.BytesIO(); img.save(buf, format="JPEG", quality=50, optimize=True)
+                    fb=buf.getvalue(); b64=base64.b64encode(fb).decode(); data_url=f"data:image/jpeg;base64,{b64}"
+                ws.update_cell(cell.row, 12, "BASE64_SAVED"); ws.update_cell(cell.row, 13, now_hk().strftime("%Y-%m-%d %H:%M:%S HKT")); ws.update_cell(cell.row, 7, "Delivered"); ws.update_cell(cell.row, 14, data_url)
+            st.cache_data.clear(); st.success(f"✅ {save_name} 已保存 長度{len(data_url)}"); st.download_button(f"⬇️ 立即下載 {save_name}", fb, file_name=save_name, mime="image/jpeg", type="primary")
 
 with tabs[4 if role=="admin" else 3 if role=="op" else 3]:
     st.subheader("💰 雜費"); show_table(load_df("Expenses"))
