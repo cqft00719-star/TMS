@@ -71,6 +71,17 @@ def get_template_excel():
     output.seek(0)
     return output.getvalue()
 
+def extract_folder_id_from_url(s):
+    if not s: return ""
+    s=str(s).strip()
+    if "folders/" in s:
+        try: return s.split("folders/")[1].split("?")[0].split("/")[0].split("&")[0]
+        except: pass
+    if "/d/" in s and "google.com" in s:
+        try: return s.split("/d/")[1].split("/")[0]
+        except: pass
+    return s
+
 def ensure_pod_folder():
     drive = get_drive_service()
     cfg = load_df("Config")
@@ -78,33 +89,29 @@ def ensure_pod_folder():
     if not cfg.empty and "Value" in cfg.columns:
         try:
             v = cfg[cfg["Key"]=="POD_Folder_ID"]["Value"].values
-            if len(v)>0: folder_id = str(v[0]).strip()
+            if len(v)>0: folder_id = extract_folder_id_from_url(v[0])
         except: pass
     if folder_id and len(folder_id)>10:
         try:
-            drive.files().get(fileId=folder_id, fields='id').execute()
+            drive.files().get(fileId=folder_id, fields='id', supportsAllDrives=True).execute()
             return folder_id
         except:
             folder_id=""
     try:
-        res = drive.files().list(q="name='TMS_POD' and mimeType='application/vnd.google-apps.folder' and trashed=false", fields="files(id,name)").execute()
+        res = drive.files().list(q="name='TMS_POD' and mimeType='application/vnd.google-apps.folder' and trashed=false", fields="files(id,name)", supportsAllDrives=True, includeItemsFromAllDrives=True).execute()
         if res.get("files"):
             folder_id = res["files"][0]["id"]
         else:
             file_meta = {"name": "TMS_POD", "mimeType": "application/vnd.google-apps.folder"}
-            folder = drive.files().create(body=file_meta, fields='id').execute()
+            folder = drive.files().create(body=file_meta, fields='id', supportsAllDrives=True).execute()
             folder_id = folder.get("id")
-            try:
-                drive.permissions().create(fileId=folder_id, body={"role":"reader","type":"anyone"}).execute()
+            try: drive.permissions().create(fileId=folder_id, body={"role":"reader","type":"anyone"}, supportsAllDrives=True).execute()
             except: pass
         try:
             ws = get_sh().worksheet("Config")
-            # 找POD_Folder_ID那行
             cell = ws.find("POD_Folder_ID")
-            if cell:
-                ws.update_cell(cell.row, 2, folder_id)
-            else:
-                ws.update_cell(2, 2, folder_id)
+            if cell: ws.update_cell(cell.row, 2, folder_id)
+            else: ws.update_cell(2, 2, folder_id)
         except: pass
         return folder_id
     except Exception as e:
@@ -168,24 +175,23 @@ if role in ["admin","op"]:
         st.subheader("📤 上傳Order - 手動 + Excel + Template")
         c1,c2=st.columns([1,2])
         with c1:
-            st.write("**步驟1: 下載模板**")
             st.download_button(label="📥 下載Order模板.xlsx", data=get_template_excel(), file_name=f"TMS_Order_Template_{today_hk()}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", type="primary", use_container_width=True)
-        with c2: st.info("欄位：Client(必填), From, To, QTY, Date(YYYY-MM-DD), Notes")
+        with c2: st.info("欄位：Client(必填), From, To, QTY, Date, Notes")
         st.divider()
-        st.write("**步驟2A: 手動加入Order**")
+        st.write("**手動加入Order**")
         with st.form("manual_order", clear_on_submit=True):
             c1,c2,c3=st.columns(3)
             client=c1.text_input("客戶*"); date=c1.date_input("日期", value=today_hk())
             from_loc=c2.text_input("起點"); to_loc=c2.text_input("終點")
             qty=c3.number_input("數量", 0.0, 100.0, 1.0); notes=c3.text_input("備註")
-            if st.form_submit_button("✍️ 手動建立Order", use_container_width=True):
+            if st.form_submit_button("✍️ 手動建立", use_container_width=True):
                 if not client.strip(): st.error("客戶必填")
                 else:
                     jid=f"JOB-{now_hk().strftime('%m%d%H%M')}-{str(uuid.uuid4())[:4]}"
                     append_row("Jobs",[jid,str(date),client.strip(),from_loc,to_loc,"","Pending",str(qty),notes,operator,now_hk().strftime("%Y-%m-%d %H:%M:%S HKT"),"",""])
                     st.success(f"已建立 {jid}"); st.rerun()
         st.divider()
-        st.write("**步驟2B: Excel批量上傳**")
+        st.write("**Excel批量上傳**")
         up=st.file_uploader("上傳Excel", type=["xlsx"], key="op_upload")
         if up:
             df=pd.read_excel(up)
@@ -199,7 +205,7 @@ if role in ["admin","op"]:
             mapping["QTY"]=cc2.selectbox("QTY", cols, key="map_QTY")
             mapping["Date"]=cc3.selectbox("Date", cols, key="map_Date")
             mapping["Notes"]=cc3.selectbox("Notes", cols, key="map_Notes")
-            if st.button("🚀 開始批量導入", type="primary", use_container_width=True):
+            if st.button("🚀 開始導入", type="primary", use_container_width=True):
                 rows=[]
                 for _, r in df.iterrows():
                     def gv(k):
@@ -209,12 +215,11 @@ if role in ["admin","op"]:
                     jid=f"JOB-{now_hk().strftime('%m%d%H%M')}-{str(uuid.uuid4())[:4]}"
                     rows.append([jid, gv("Date") or str(today_hk()), gv("Client"), gv("From"), gv("To"), "", "Pending", gv("QTY"), gv("Notes"), operator, now_hk().strftime("%Y-%m-%d %H:%M:%S HKT"), "", ""])
                 if rows:
-                    append_rows("Jobs", rows)
-                    st.success(f"成功導入 {len(rows)} 張"); st.balloons(); st.rerun()
+                    append_rows("Jobs", rows); st.success(f"成功導入 {len(rows)} 張"); st.balloons(); st.rerun()
 
 if role=="driver":
     with tabs[0]:
-        st.subheader("🟢 可接任務池 - 點擊搶單")
+        st.subheader("🟢 可接任務池")
         if df_jobs.empty: st.info("暫無可接任務")
         else:
             avail = df_jobs[(df_jobs["Status"].astype(str)=="Pending") | (df_jobs["Driver"].astype(str)=="")]
@@ -233,7 +238,7 @@ if role=="driver":
                                 ws.update_cell(cell.row, 6, operator); ws.update_cell(cell.row, 7, "Accepted")
                                 st.cache_data.clear(); st.success(f"{jid} 搶單成功"); st.rerun()
 
-with tabs[1 if role in ["admin","op"] else 1 if role=="driver" else 1]:
+with tabs[1 if role!="driver" else 1]:
     if role=="driver":
         st.subheader("🚚 我的任務")
         my_jobs = df_jobs[df_jobs["Driver"].astype(str)==operator] if not df_jobs.empty and "Driver" in df_jobs.columns else pd.DataFrame()
@@ -248,7 +253,6 @@ with tabs[1 if role in ["admin","op"] else 1 if role=="driver" else 1]:
                     mp={"Accepted-已接單":"Accepted","InTransit-運輸中":"InTransit","Delivered-已送達":"Delivered","Completed-已完成":"Completed"}
                     ws.update_cell(cell.row, 7, mp[ns]); st.cache_data.clear(); st.success("已更新"); st.rerun()
 
-# POD - 最終修復版
 with tabs[3 if role=="admin" else 2 if role=="op" else 2]:
     st.subheader("📸 上傳POD - 自動入Google Drive")
     my_jobs_pool = df_jobs if role in ["admin","op"] else df_jobs[df_jobs["Driver"].astype(str)==operator] if not df_jobs.empty else pd.DataFrame()
@@ -264,19 +268,25 @@ with tabs[3 if role=="admin" else 2 if role=="op" else 2]:
                 with st.spinner("上傳到Google Drive中..."):
                     drive=get_drive_service()
                     folder_id = ensure_pod_folder()
+                    if not folder_id or len(folder_id)<10:
+                        st.error(f"搵唔到TMS_POD Folder，請確認已Share俾 {st.secrets['gcp_service_account']['client_email']}")
+                        st.stop()
                     media=MediaIoBaseUpload(io.BytesIO(pod_file.getvalue()), mimetype=pod_file.type, resumable=True)
-                    file_meta={"name": f"{jid}_POD_{now_hk().strftime('%Y%m%d%H%M')}_{pod_file.name}"}
-                    if folder_id: file_meta["parents"]=[folder_id]
-                    uploaded=drive.files().create(body=file_meta, media_body=media, fields='id, webViewLink').execute()
-                    try: drive.permissions().create(fileId=uploaded["id"], body={"role":"reader","type":"anyone"}).execute()
+                    file_meta={"name": f"{jid}_POD_{now_hk().strftime('%Y%m%d%H%M')}_{pod_file.name}", "parents":[folder_id]}
+                    uploaded=drive.files().create(body=file_meta, media_body=media, fields='id, webViewLink', supportsAllDrives=True).execute()
+                    try:
+                        drive.permissions().create(fileId=uploaded["id"], body={"role":"reader","type":"anyone"}, supportsAllDrives=True).execute()
                     except: pass
                     link=uploaded.get("webViewLink","")
                     ws=get_sh().worksheet("Jobs"); cell=ws.find(jid)
-                    if cell: ws.update_cell(cell.row, 12, link); ws.update_cell(cell.row, 13, now_hk().strftime("%Y-%m-%d %H:%M:%S HKT")); ws.update_cell(cell.row, 7, "Delivered")
+                    if cell:
+                        ws.update_cell(cell.row, 12, link)
+                        ws.update_cell(cell.row, 13, now_hk().strftime("%Y-%m-%d %H:%M:%S HKT"))
+                        ws.update_cell(cell.row, 7, "Delivered")
                     st.cache_data.clear()
-                    st.success("✅ 上傳成功，已自動入TMS_POD Folder")
-                    st.link_button("🔗 查看Drive相片", link)
-                    if folder_id: st.link_button("📁 打開TMS_POD Folder", f"https://drive.google.com/drive/folders/{folder_id}")
+                    st.success("✅ 上傳成功，已自動入TMS_POD")
+                    st.link_button("🔗 查看相片", link)
+                    st.link_button("📁 打開Folder", f"https://drive.google.com/drive/folders/{folder_id}")
             except Exception as e:
                 st.error(f"上傳失敗: {e}")
                 import traceback; st.code(traceback.format_exc())
