@@ -2,112 +2,225 @@ import streamlit as st
 import pandas as pd
 import gspread
 from google.oauth2.service_account import Credentials
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaIoBaseUpload
 import datetime
 from datetime import timezone, timedelta
 import uuid
-import traceback
+import io
 
 HKT = timezone(timedelta(hours=8))
-def now_hk():
-    return datetime.datetime.now(HKT)
+def now_hk(): return datetime.datetime.now(HKT)
+def today_hk(): return now_hk().date()
 
-st.set_page_config(page_title="TMS 運輸系統", layout="wide")
+st.set_page_config(page_title="TMS 運輸系統", layout="wide", page_icon="🚚")
 
 @st.cache_resource
 def get_client():
     scopes = ["https://www.googleapis.com/auth/spreadsheets","https://www.googleapis.com/auth/drive"]
-    if "gcp_service_account" not in st.secrets:
-        st.error("❌ Secrets 無 gcp_service_account")
-        st.stop()
-    try:
-        creds = Credentials.from_service_account_info(st.secrets["gcp_service_account"], scopes=scopes)
-        return gspread.authorize(creds)
-    except Exception as e:
-        st.error(f"❌ Google認證失敗: {e}")
-        st.code(traceback.format_exc())
-        st.stop()
+    creds = Credentials.from_service_account_info(st.secrets["gcp_service_account"], scopes=scopes)
+    return gspread.authorize(creds), creds
 
 def get_sh():
-    try:
-        sheet_id = st.secrets["connections"]["gsheets"]["spreadsheet"]
-        return get_client().open_by_key(sheet_id)
-    except Exception as e:
-        st.error(f"❌ 開唔到Google Sheet: {e} | ID: {st.secrets.get('connections',{}).get('gsheets',{}).get('spreadsheet','無ID')}")
-        st.info(f"請去 https://docs.google.com/spreadsheets/d/{st.secrets['connections']['gsheets']['spreadsheet']} 按 Share -> 加入 {st.secrets['gcp_service_account']['client_email']} 做 Editor")
-        st.code(traceback.format_exc())
-        st.stop()
+    client, _ = get_client()
+    return client.open_by_key(st.secrets["connections"]["gsheets"]["spreadsheet"])
 
-@st.cache_data(ttl=5)
+def get_drive_service():
+    _, creds = get_client()
+    return build('drive', 'v3', credentials=creds)
+
+@st.cache_data(ttl=10)
 def load_df(tab):
     try:
         ws = get_sh().worksheet(tab)
-        data = ws.get_all_records()
-        return pd.DataFrame(data) if data else pd.DataFrame()
+        return pd.DataFrame(ws.get_all_records())
     except:
         return pd.DataFrame()
 
-def append_row(tab, row):
-    get_sh().worksheet(tab).append_row(row, value_input_option='USER_ENTERED')
+def append_rows(tab, rows):
+    get_sh().worksheet(tab).append_rows(rows, value_input_option='USER_ENTERED')
     st.cache_data.clear()
+
+def append_row(tab, row):
+    append_rows(tab, [row])
 
 def ensure_sheets():
     sh = get_sh()
     titles = [ws.title for ws in sh.worksheets()]
     if "Users" not in titles:
-        sh.add_worksheet(title="Users", rows=100, cols=10).update([["username","password","name","role"], ["admin","admin123","Manager","admin"], ["John","John123","John","driver"], ["op01","op01","OP01","op"]])
+        sh.add_worksheet("Users",100,10).update([["username","password","name","role"]])
+        sh.worksheet("Users").append_rows([["admin","admin123","Admin","admin"],["John","John123","John","driver"],["op01","op01","OP01","op"]])
     if "Jobs" not in titles:
-        sh.add_worksheet(title="Jobs", rows=1000, cols=20).update([["JobID","Date","Client","From","To","Driver","Status","QTY","Notes","CreatedBy","CreatedAt_HKT"]])
+        sh.add_worksheet("Jobs",5000,20).update([["JobID","Date","Client","From","To","Driver","Status","QTY","Notes","CreatedBy","CreatedAt_HKT","POD_Link","PodTime_HKT"]])
+    if "Expenses" not in titles:
+        sh.add_worksheet("Expenses",5000,10).update([["ExpenseID","Date","JobID","Driver","Type","Amount","Remark","CreatedAt_HKT"]])
+    if "POD_FolderID" not in titles:
+        sh.add_worksheet("Config",10,10).update([["Key","Value"],["POD_Folder_ID",""]])
 
-if "user" not in st.session_state:
-    st.session_state.user = None
-
+# --- 登入 ---
+if "user" not in st.session_state: st.session_state.user=None
 if not st.session_state.user:
     st.title("TMS 多人運輸系統 - 登入")
-    st.caption(f"香港時間: {now_hk().strftime('%Y-%m-%d %H:%M:%S HKT')}")
-    df_u = load_df("Users")
-    if df_u.empty or "username" not in df_u.columns:
-        df_u = pd.DataFrame([{"username":"admin","password":"admin123","name":"Manager","role":"admin"}, {"username":"John","password":"John123","name":"John","role":"driver"}, {"username":"op01","password":"op01","name":"OP01","role":"op"}])
-    df_u["username"]=df_u["username"].astype(str).str.strip()
-    df_u["password"]=df_u["password"].astype(str).str.strip()
-    u=st.text_input("用戶名")
-    p=st.text_input("密碼", type="password")
-    if st.button("登入", type="primary", use_container_width=True):
-        m=df_u[(df_u["username"]==str(u).strip()) & (df_u["password"]==str(p).strip())]
+    df_u=load_df("Users")
+    if df_u.empty: df_u=pd.DataFrame([{"username":"admin","password":"admin123","name":"Admin","role":"admin"}])
+    u=st.text_input("用戶名"); p=st.text_input("密碼",type="password")
+    if st.button("登入",type="primary",use_container_width=True):
+        m=df_u[(df_u["username"].astype(str)==u) & (df_u["password"].astype(str)==p)]
         if not m.empty:
-            st.session_state.user=m.iloc[0].to_dict()
-            st.rerun()
-        else:
-            st.error(f"帳號錯誤，現有: {', '.join(df_u['username'].tolist())}")
+            st.session_state.user=m.iloc[0].to_dict(); st.rerun()
+        else: st.error("帳號密碼錯")
     st.stop()
 
 ensure_sheets()
 user=st.session_state.user
 role=str(user.get("role","driver")).lower()
 operator=user.get("username","")
-st.sidebar.write(f"👤 {operator} | {role} | {now_hk().strftime('%H:%M HKT')}")
-if st.sidebar.button("登出"):
-    st.session_state.user=None; st.cache_data.clear(); st.rerun()
-st.title(f"TMS - {role.upper()}")
-df_jobs=load_df("Jobs")
-df_users=load_df("Users")
-driver_list=df_users[df_users["role"].astype(str).str.lower()=="driver"]["username"].astype(str).tolist() if not df_users.empty and "username" in df_users.columns else ["John"]
+st.sidebar.title(f"👤 {user.get('name')} ({role})")
+st.sidebar.caption(f"{now_hk().strftime('%Y-%m-%d %H:%M HKT')}")
+if st.sidebar.button("登出"): st.session_state.user=None; st.cache_data.clear(); st.rerun()
+
+# --- 功能分頁 ---
 if role in ["admin","op"]:
-    t1,t2=st.tabs(["📋 任務","➕ 建立"])
-    with t1:
-        st.dataframe(df_jobs.sort_index(ascending=False) if not df_jobs.empty else df_jobs, use_container_width=True)
-    with t2:
-        with st.form("create", clear_on_submit=True):
-            client=st.text_input("客戶 *")
+    tabs = st.tabs(["📊 Dashboard", "📋 任務管理", "📤 Excel批量導入", "💰 雜費", "👥 用戶"])
+else:
+    tabs = st.tabs(["🚚 我的任務", "📸 上傳POD", "💰 我的雜費"])
+
+df_jobs=load_df("Jobs")
+df_exp=load_df("Expenses")
+
+# 1. Dashboard (Admin/OP)
+if role in ["admin","op"]:
+    with tabs[0]:
+        st.subheader("Dashboard")
+        if df_jobs.empty:
+            st.info("暫無數據")
+        else:
+            c1,c2,c3,c4=st.columns(4)
+            c1.metric("總任務", len(df_jobs))
+            c2.metric("待派", len(df_jobs[df_jobs["Status"]=="Pending"]) if "Status" in df_jobs.columns else 0)
+            c3.metric("運輸中", len(df_jobs[df_jobs["Status"]=="InTransit"]) if "Status" in df_jobs.columns else 0)
+            c4.metric("已完成", len(df_jobs[df_jobs["Status"]=="Completed"]) if "Status" in df_jobs.columns else 0)
+            if "Status" in df_jobs.columns:
+                st.bar_chart(df_jobs["Status"].value_counts())
+            if "Driver" in df_jobs.columns:
+                st.write("司機任務分佈")
+                st.bar_chart(df_jobs["Driver"].value_counts())
+            st.dataframe(df_jobs.sort_values("Date", ascending=False) if "Date" in df_jobs.columns else df_jobs, use_container_width=True)
+
+# 2. 任務管理
+with tabs[1 if role in ["admin","op"] else 0]:
+    st.subheader("任務列表")
+    st.dataframe(df_jobs, use_container_width=True, height=400)
+    if role in ["admin","op"] and not df_jobs.empty:
+        with st.expander("更新狀態 / 指派司機"):
+            job_id=st.selectbox("JobID", df_jobs["JobID"].astype(str).tolist(), key="upd_job")
+            df_users=load_df("Users")
+            driver_list=df_users[df_users["role"].astype(str)=="driver"]["username"].tolist() if not df_users.empty else ["John"]
+            ns=st.selectbox("狀態", ["Pending","Assigned","InTransit","Delivered","Completed"], key="upd_stat")
+            nd=st.selectbox("司機", ["不更改"]+driver_list, key="upd_driver")
+            if st.button("確認更新"):
+                ws=get_sh().worksheet("Jobs")
+                cell=ws.find(job_id)
+                if cell:
+                    ws.update_cell(cell.row, 7, ns)
+                    if nd!="不更改": ws.update_cell(cell.row, 6, nd)
+                    st.cache_data.clear(); st.success("已更新"); st.rerun()
+    # 建立
+    if role in ["admin","op"]:
+        with st.form("create_job", clear_on_submit=True):
+            st.write("**手動建立任務**")
             c1,c2=st.columns(2)
-            f=c1.text_input("起點"); t=c2.text_input("終點")
-            d=c1.selectbox("司機",[""]+driver_list); q=c2.number_input("數量",0.0,1.0)
+            client=c1.text_input("客戶*"); date=c1.date_input("日期", value=today_hk())
+            from_loc=c1.text_input("起點"); to_loc=c2.text_input("終點")
+            df_users=load_df("Users")
+            driver_list=df_users[df_users["role"].astype(str)=="driver"]["username"].tolist() if not df_users.empty else ["John"]
+            driver=c2.selectbox("司機", [""]+driver_list); qty=c2.number_input("數量",0.0,1.0)
             notes=st.text_area("備註")
             if st.form_submit_button("建立"):
                 if not client: st.error("客戶必填")
                 else:
-                    jid=f"JOB-{now_hk().strftime('%m%d%H%M')}-{str(uuid.uuid4())[:4].upper()}"
-                    append_row("Jobs",[jid,str(now_hk().date()),client,f,t,d,"Assigned" if d else "Pending",str(q),notes,operator,now_hk().strftime("%Y-%m-%d %H:%M:%S HKT")])
-                    st.success(f"{jid} 已建立"); st.rerun()
-else:
-    my=df_jobs[df_jobs["Driver"].astype(str)==operator] if not df_jobs.empty and "Driver" in df_jobs.columns else pd.DataFrame()
-    st.dataframe(my, use_container_width=True)
+                    jid=f"JOB-{now_hk().strftime('%m%d%H%M')}-{str(uuid.uuid4())[:4]}"
+                    append_row("Jobs",[jid,str(date),client,from_loc,to_loc,driver,"Assigned" if driver else "Pending",str(qty),notes,operator,now_hk().strftime("%Y-%m-%d %H:%M:%S HKT"),"",""])
+                    st.success(jid); st.rerun()
+
+# 3. Excel批量導入 (Admin/OP)
+if role in ["admin","op"]:
+    with tabs[2]:
+        st.subheader("📤 Excel批量導入Order")
+        st.caption("支援欄位: Client, From, To, QTY, Date, Driver, Notes | 第一行做表頭")
+        up=st.file_uploader("上傳Excel (.xlsx)", type=["xlsx"])
+        if up:
+            df=pd.read_excel(up)
+            st.dataframe(df.head())
+            # 欄位映射
+            mapping={"Client":None,"From":None,"To":None,"QTY":None,"Date":None,"Driver":None,"Notes":None}
+            cols=["(不導入)"]+df.columns.tolist()
+            c1,c2=st.columns(2)
+            for k in mapping.keys():
+                mapping[k]=st.selectbox(f"{k} 對應Excel邊欄", cols, key=f"map_{k}")
+            if st.button("開始導入", type="primary"):
+                rows=[]
+                for _, r in df.iterrows():
+                    def gv(k): return str(r[mapping[k]]) if mapping[k]!="(不導入)" and mapping[k] in df.columns else ""
+                    jid=f"JOB-{now_hk().strftime('%m%d%H%M')}-{str(uuid.uuid4())[:4]}"
+                    rows.append([jid, gv("Date") or str(today_hk()), gv("Client"), gv("From"), gv("To"), gv("Driver"), "Assigned" if gv("Driver") else "Pending", gv("QTY"), gv("Notes"), operator, now_hk().strftime("%Y-%m-%d %H:%M:%S HKT"), "", ""])
+                append_rows("Jobs", rows)
+                st.success(f"已導入 {len(rows)} 行"); st.balloons()
+
+# 4. POD上傳 (司機)
+with tabs[2 if role in ["admin","op"] else 1]:
+    st.subheader("📸 上傳POD簽收")
+    my_jobs = df_jobs if role in ["admin","op"] else df_jobs[df_jobs["Driver"].astype(str)==operator] if not df_jobs.empty else pd.DataFrame()
+    if my_jobs.empty:
+        st.info("無任務")
+    else:
+        jid=st.selectbox("選擇JobID", my_jobs["JobID"].astype(str).tolist(), key="pod_job")
+        pod_file=st.file_uploader("影相或上傳POD", type=["jpg","png","pdf"], key="pod_file")
+        if pod_file and st.button("上傳POD"):
+            try:
+                drive=get_drive_service()
+                # 上傳到Drive
+                media=MediaIoBaseUpload(io.BytesIO(pod_file.read()), mimetype=pod_file.type)
+                file_meta={"name": f"{jid}_POD_{now_hk().strftime('%Y%m%d%H%M')}_{pod_file.name}"}
+                # 如果Config有Folder ID就放落去
+                cfg=load_df("Config")
+                folder_id=""
+                if not cfg.empty and "POD_Folder_ID" in cfg.columns:
+                    try: folder_id=cfg[cfg["Key"]=="POD_Folder_ID"]["Value"].values[0]
+                    except: pass
+                if folder_id: file_meta["parents"]=[folder_id]
+                uploaded=drive.files().create(body=file_meta, media_body=media, fields='id, webViewLink').execute()
+                link=uploaded.get("webViewLink","")
+                # 更新Jobs
+                ws=get_sh().worksheet("Jobs")
+                cell=ws.find(jid)
+                if cell:
+                    ws.update_cell(cell.row, 12, link) # POD_Link
+                    ws.update_cell(cell.row, 13, now_hk().strftime("%Y-%m-%d %H:%M:%S HKT"))
+                    ws.update_cell(cell.row, 7, "Delivered")
+                st.cache_data.clear()
+                st.success(f"上傳成功: {link}")
+                st.link_button("查看POD", link)
+            except Exception as e:
+                st.error(f"上傳失敗: {e} (請確認Drive API已啟用)")
+
+# 5. 雜費 (全部人)
+with tabs[3 if role in ["admin","op"] else 2]:
+    st.subheader("💰 雜費錄入")
+    st.dataframe(df_exp, use_container_width=True)
+    with st.form("exp_form", clear_on_submit=True):
+        c1,c2,c3=st.columns(3)
+        jid=c1.selectbox("關聯JobID", [""]+ (df_jobs["JobID"].astype(str).tolist() if not df_jobs.empty else []))
+        etype=c2.selectbox("類型", ["隧道費","泊車費","油費","雜費","其他"])
+        amt=c3.number_input("金額 $", min_value=0.0, step=1.0)
+        remark=st.text_input("備註")
+        if st.form_submit_button("提交雜費"):
+            eid=f"EXP-{now_hk().strftime('%m%d%H%M')}"
+            append_row("Expenses", [eid, str(today_hk()), jid, operator, etype, amt, remark, now_hk().strftime("%Y-%m-%d %H:%M:%S HKT")])
+            st.success("已提交"); st.rerun()
+
+# 用戶管理
+if role in ["admin","op"]:
+    with tabs[4]:
+        st.subheader("用戶管理")
+        st.dataframe(load_df("Users"), use_container_width=True)
