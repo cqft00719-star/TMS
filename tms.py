@@ -58,25 +58,63 @@ def ensure_sheets():
     create_if_not_exist("Expenses", ["ExpenseID","Date","JobID","Driver","Type","Amount","Remark","CreatedAt_HKT"])
     create_if_not_exist("Config", ["Key","Value"], [["POD_Folder_ID",""]])
 
-# Excel Template 產生
 def get_template_excel():
     df_template = pd.DataFrame([
         {"Client":"ABC公司","From":"葵涌","To":"中環","QTY":2,"Date":str(today_hk()),"Notes":"易碎"},
         {"Client":"XYZ公司","From":"觀塘","To":"沙田","QTY":1,"Date":str(today_hk()),"Notes":""},
     ])
-    # 加說明
     df_template = df_template[["Client","From","To","QTY","Date","Notes"]]
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         df_template.to_excel(writer, index=False, sheet_name='OrderTemplate')
-        # 加第二個說明sheet
         pd.DataFrame([{"欄位":"Client","必填":"是","說明":"客戶名"}, {"欄位":"From","必填":"否","說明":"起點"}, {"欄位":"To","必填":"否","說明":"終點"}, {"欄位":"QTY","必填":"否","說明":"數量"}, {"欄位":"Date","必填":"否","說明":"YYYY-MM-DD"}, {"欄位":"Notes","必填":"否","說明":"備註"}]).to_excel(writer, index=False, sheet_name='說明')
     output.seek(0)
     return output.getvalue()
 
+def ensure_pod_folder():
+    drive = get_drive_service()
+    cfg = load_df("Config")
+    folder_id = ""
+    if not cfg.empty and "Value" in cfg.columns:
+        try:
+            v = cfg[cfg["Key"]=="POD_Folder_ID"]["Value"].values
+            if len(v)>0: folder_id = str(v[0]).strip()
+        except: pass
+    if folder_id and len(folder_id)>10:
+        try:
+            drive.files().get(fileId=folder_id, fields='id').execute()
+            return folder_id
+        except:
+            folder_id=""
+    try:
+        res = drive.files().list(q="name='TMS_POD' and mimeType='application/vnd.google-apps.folder' and trashed=false", fields="files(id,name)").execute()
+        if res.get("files"):
+            folder_id = res["files"][0]["id"]
+        else:
+            file_meta = {"name": "TMS_POD", "mimeType": "application/vnd.google-apps.folder"}
+            folder = drive.files().create(body=file_meta, fields='id').execute()
+            folder_id = folder.get("id")
+            try:
+                drive.permissions().create(fileId=folder_id, body={"role":"reader","type":"anyone"}).execute()
+            except: pass
+        try:
+            ws = get_sh().worksheet("Config")
+            # 找POD_Folder_ID那行
+            cell = ws.find("POD_Folder_ID")
+            if cell:
+                ws.update_cell(cell.row, 2, folder_id)
+            else:
+                ws.update_cell(2, 2, folder_id)
+        except: pass
+        return folder_id
+    except Exception as e:
+        st.warning(f"自動建Folder失敗: {e}")
+        return ""
+
 if "user" not in st.session_state: st.session_state.user=None
 if not st.session_state.user:
     st.title("TMS 多人運輸系統 - 登入")
+    st.caption(f"香港時間: {now_hk().strftime('%Y-%m-%d %H:%M HKT')}")
     df_u=load_df("Users")
     if df_u.empty: df_u=pd.DataFrame([{"username":"admin","password":"admin123","name":"Admin","role":"admin"}])
     u=st.text_input("用戶名"); p=st.text_input("密碼",type="password")
@@ -96,9 +134,9 @@ st.sidebar.caption(now_hk().strftime('%Y-%m-%d %H:%M HKT'))
 if st.sidebar.button("登出"): st.session_state.user=None; st.cache_data.clear(); st.rerun()
 
 if role in ["admin"]:
-    tabs = st.tabs(["📊 Dashboard", "📋 任務管理", "📤 上傳Order", "💰 雜費", "👥 用戶"])
+    tabs = st.tabs(["📊 Dashboard", "📋 任務管理", "📤 上傳Order", "📸 上傳POD", "💰 雜費", "👥 用戶"])
 elif role == "op":
-    tabs = st.tabs(["📋 任務管理", "📤 上傳Order", "💰 雜費"])
+    tabs = st.tabs(["📋 任務管理", "📤 上傳Order", "📸 上傳POD", "💰 雜費"])
 else:
     tabs = st.tabs(["🟢 可接任務池", "🚚 我的任務", "📸 上傳POD", "💰 我的雜費"])
 
@@ -111,7 +149,8 @@ if role=="admin":
         if df_jobs.empty: st.info("暫無數據")
         else:
             c1,c2,c3,c4=st.columns(4)
-            c1.metric("總任務", len(df_jobs)); c2.metric("待搶", len(df_jobs[df_jobs["Status"]=="Pending"]) if "Status" in df_jobs.columns else 0)
+            c1.metric("總任務", len(df_jobs))
+            c2.metric("待搶", len(df_jobs[df_jobs["Status"]=="Pending"]) if "Status" in df_jobs.columns else 0)
             c3.metric("已接單", len(df_jobs[df_jobs["Status"]=="Accepted"]) if "Status" in df_jobs.columns else 0)
             c4.metric("已完成", len(df_jobs[df_jobs["Status"]=="Completed"]) if "Status" in df_jobs.columns else 0)
             st.bar_chart(df_jobs["Status"].value_counts() if "Status" in df_jobs.columns else pd.Series())
@@ -123,52 +162,33 @@ if role in ["admin","op"]:
         st.subheader("所有任務")
         st.dataframe(df_jobs, use_container_width=True, height=350)
 
-# ==================== 重點：上傳Order 三合一 ====================
 if role in ["admin","op"]:
     idx = 2 if role=="admin" else 1
     with tabs[idx]:
         st.subheader("📤 上傳Order - 手動 + Excel + Template")
-
-        # 1. 下載Template
         c1,c2=st.columns([1,2])
         with c1:
             st.write("**步驟1: 下載模板**")
-            st.download_button(
-                label="📥 下載Order模板.xlsx",
-                data=get_template_excel(),
-                file_name=f"TMS_Order_Template_{today_hk()}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                type="primary",
-                use_container_width=True
-            )
-        with c2:
-            st.info("模板欄位：Client(必填), From, To, QTY, Date(YYYY-MM-DD), Notes。填好後用下面批量上傳。")
-
+            st.download_button(label="📥 下載Order模板.xlsx", data=get_template_excel(), file_name=f"TMS_Order_Template_{today_hk()}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", type="primary", use_container_width=True)
+        with c2: st.info("欄位：Client(必填), From, To, QTY, Date(YYYY-MM-DD), Notes")
         st.divider()
-
-        # 2. 手動加入
-        st.write("**步驟2A: 手動加入Order (逐張)**")
+        st.write("**步驟2A: 手動加入Order**")
         with st.form("manual_order", clear_on_submit=True):
             c1,c2,c3=st.columns(3)
-            client=c1.text_input("客戶* (必填)"); date=c1.date_input("日期", value=today_hk())
+            client=c1.text_input("客戶*"); date=c1.date_input("日期", value=today_hk())
             from_loc=c2.text_input("起點"); to_loc=c2.text_input("終點")
             qty=c3.number_input("數量", 0.0, 100.0, 1.0); notes=c3.text_input("備註")
-            if st.form_submit_button("✍️ 手動建立此Order (待搶)", type="secondary", use_container_width=True):
-                if not client.strip():
-                    st.error("客戶必填")
+            if st.form_submit_button("✍️ 手動建立Order", use_container_width=True):
+                if not client.strip(): st.error("客戶必填")
                 else:
                     jid=f"JOB-{now_hk().strftime('%m%d%H%M')}-{str(uuid.uuid4())[:4]}"
                     append_row("Jobs",[jid,str(date),client.strip(),from_loc,to_loc,"","Pending",str(qty),notes,operator,now_hk().strftime("%Y-%m-%d %H:%M:%S HKT"),"",""])
-                    st.success(f"已建立 {jid} - 司機可搶單"); st.rerun()
-
+                    st.success(f"已建立 {jid}"); st.rerun()
         st.divider()
-
-        # 3. Excel批量上傳
         st.write("**步驟2B: Excel批量上傳**")
-        up=st.file_uploader("上傳已填好嘅Excel", type=["xlsx"], key="op_upload")
+        up=st.file_uploader("上傳Excel", type=["xlsx"], key="op_upload")
         if up:
             df=pd.read_excel(up)
-            st.write(f"讀到 {len(df)} 行")
             st.dataframe(df.head(), use_container_width=True)
             cols=["(不導入)"]+df.columns.tolist()
             mapping={}
@@ -190,10 +210,7 @@ if role in ["admin","op"]:
                     rows.append([jid, gv("Date") or str(today_hk()), gv("Client"), gv("From"), gv("To"), "", "Pending", gv("QTY"), gv("Notes"), operator, now_hk().strftime("%Y-%m-%d %H:%M:%S HKT"), "", ""])
                 if rows:
                     append_rows("Jobs", rows)
-                    st.success(f"成功導入 {len(rows)} 張Order，司機可去搶單"); st.balloons()
-                    st.rerun()
-                else:
-                    st.error("無有效行，請確認Client欄有對應")
+                    st.success(f"成功導入 {len(rows)} 張"); st.balloons(); st.rerun()
 
 if role=="driver":
     with tabs[0]:
@@ -201,28 +218,26 @@ if role=="driver":
         if df_jobs.empty: st.info("暫無可接任務")
         else:
             avail = df_jobs[(df_jobs["Status"].astype(str)=="Pending") | (df_jobs["Driver"].astype(str)=="")]
-            if avail.empty: st.success("暫無待搶任務")
+            if avail.empty: st.success("暫無待搶")
             else:
                 st.dataframe(avail, use_container_width=True)
                 for _, row in avail.iterrows():
                     jid=row["JobID"]
                     with st.container(border=True):
                         c1,c2=st.columns([4,1])
-                        c1.write(f"**{jid}** | {row.get('Client','')} | {row.get('From','')}->{row.get('To','')} | {row.get('QTY','')}件 | {row.get('Date','')}")
+                        c1.write(f"**{jid}** | {row.get('Client','')} | {row.get('From','')}->{row.get('To','')}")
                         if c2.button("搶此單", key=f"claim_{jid}", type="primary"):
-                            ws=get_sh().worksheet("Jobs")
-                            cell=ws.find(jid)
-                            if ws.cell(cell.row, 6).value not in [None,""," "]:
-                                st.error("已被搶")
+                            ws=get_sh().worksheet("Jobs"); cell=ws.find(jid)
+                            if ws.cell(cell.row, 6).value not in [None,""," "]: st.error("已被搶")
                             else:
                                 ws.update_cell(cell.row, 6, operator); ws.update_cell(cell.row, 7, "Accepted")
-                                st.cache_data.clear(); st.success(f"{jid} 搶單成功，已接單"); st.rerun()
+                                st.cache_data.clear(); st.success(f"{jid} 搶單成功"); st.rerun()
 
-with tabs[1 if role!="driver" else 1]:
+with tabs[1 if role in ["admin","op"] else 1 if role=="driver" else 1]:
     if role=="driver":
         st.subheader("🚚 我的任務")
         my_jobs = df_jobs[df_jobs["Driver"].astype(str)==operator] if not df_jobs.empty and "Driver" in df_jobs.columns else pd.DataFrame()
-        if my_jobs.empty: st.info("未接單，去搶單池")
+        if my_jobs.empty: st.info("未接單")
         else:
             st.dataframe(my_jobs, use_container_width=True)
             sel=st.selectbox("選擇我的Job改狀態", my_jobs["JobID"].tolist(), key="driver_status_job")
@@ -233,31 +248,40 @@ with tabs[1 if role!="driver" else 1]:
                     mp={"Accepted-已接單":"Accepted","InTransit-運輸中":"InTransit","Delivered-已送達":"Delivered","Completed-已完成":"Completed"}
                     ws.update_cell(cell.row, 7, mp[ns]); st.cache_data.clear(); st.success("已更新"); st.rerun()
 
-with tabs[2 if role!="driver" else 2]:
-    st.subheader("📸 上傳POD")
+# POD - 最終修復版
+with tabs[3 if role=="admin" else 2 if role=="op" else 2]:
+    st.subheader("📸 上傳POD - 自動入Google Drive")
     my_jobs_pool = df_jobs if role in ["admin","op"] else df_jobs[df_jobs["Driver"].astype(str)==operator] if not df_jobs.empty else pd.DataFrame()
-    if role=="driver" and not my_jobs_pool.empty:
-        my_jobs_pool = my_jobs_pool[my_jobs_pool["Status"].isin(["Accepted","InTransit","Delivered"])] if "Status" in my_jobs_pool.columns else my_jobs_pool
+    if role=="driver" and not my_jobs_pool.empty and "Status" in my_jobs_pool.columns:
+        my_jobs_pool = my_jobs_pool[my_jobs_pool["Status"].isin(["Accepted","InTransit","Delivered"])]
     if my_jobs_pool.empty: st.info("無任務可上傳")
     else:
-        jid=st.selectbox("選擇JobID", my_jobs_pool["JobID"].astype(str).tolist(), key="pod_job2")
-        pod_file=st.file_uploader("拍照或上傳", type=["jpg","png","pdf","jpeg"], key="pod_file2")
-        if pod_file and st.button("上傳POD", type="primary", key="btn_pod"):
+        jid=st.selectbox("選擇JobID", my_jobs_pool["JobID"].astype(str).tolist(), key="pod_job_final")
+        pod_file=st.file_uploader("拍照或上傳", type=["jpg","png","pdf","jpeg"], key="pod_file_final")
+        if pod_file: st.image(pod_file, caption="預覽", width=350)
+        if pod_file and st.button("上傳POD", type="primary", key="btn_pod_final"):
             try:
-                drive=get_drive_service()
-                media=MediaIoBaseUpload(io.BytesIO(pod_file.read()), mimetype=pod_file.type, resumable=True)
-                file_meta={"name": f"{jid}_POD_{now_hk().strftime('%Y%m%d%H%M')}_{pod_file.name}"}
-                cfg=load_df("Config")
-                folder_id=cfg[cfg["Key"]=="POD_Folder_ID"]["Value"].values[0] if not cfg.empty and "Value" in cfg.columns else ""
-                if folder_id and len(str(folder_id))>10: file_meta["parents"]=[str(folder_id).strip()]
-                uploaded=drive.files().create(body=file_meta, media_body=media, fields='id, webViewLink').execute()
-                link=uploaded.get("webViewLink","")
-                ws=get_sh().worksheet("Jobs"); cell=ws.find(jid)
-                if cell: ws.update_cell(cell.row, 12, link); ws.update_cell(cell.row, 13, now_hk().strftime("%Y-%m-%d %H:%M:%S HKT")); ws.update_cell(cell.row, 7, "Delivered")
-                st.cache_data.clear(); st.success("POD上傳成功"); st.link_button("查看POD", link)
-            except Exception as e: st.error(f"上傳失敗: {e}")
+                with st.spinner("上傳到Google Drive中..."):
+                    drive=get_drive_service()
+                    folder_id = ensure_pod_folder()
+                    media=MediaIoBaseUpload(io.BytesIO(pod_file.getvalue()), mimetype=pod_file.type, resumable=True)
+                    file_meta={"name": f"{jid}_POD_{now_hk().strftime('%Y%m%d%H%M')}_{pod_file.name}"}
+                    if folder_id: file_meta["parents"]=[folder_id]
+                    uploaded=drive.files().create(body=file_meta, media_body=media, fields='id, webViewLink').execute()
+                    try: drive.permissions().create(fileId=uploaded["id"], body={"role":"reader","type":"anyone"}).execute()
+                    except: pass
+                    link=uploaded.get("webViewLink","")
+                    ws=get_sh().worksheet("Jobs"); cell=ws.find(jid)
+                    if cell: ws.update_cell(cell.row, 12, link); ws.update_cell(cell.row, 13, now_hk().strftime("%Y-%m-%d %H:%M:%S HKT")); ws.update_cell(cell.row, 7, "Delivered")
+                    st.cache_data.clear()
+                    st.success("✅ 上傳成功，已自動入TMS_POD Folder")
+                    st.link_button("🔗 查看Drive相片", link)
+                    if folder_id: st.link_button("📁 打開TMS_POD Folder", f"https://drive.google.com/drive/folders/{folder_id}")
+            except Exception as e:
+                st.error(f"上傳失敗: {e}")
+                import traceback; st.code(traceback.format_exc())
 
-with tabs[3 if role in ["admin","op"] else 3]:
+with tabs[4 if role=="admin" else 3 if role=="op" else 3]:
     st.subheader("💰 雜費錄入")
     st.dataframe(df_exp[df_exp["Driver"].astype(str)==operator] if role=="driver" and not df_exp.empty else df_exp, use_container_width=True)
     with st.form("exp_form2", clear_on_submit=True):
@@ -272,7 +296,7 @@ with tabs[3 if role in ["admin","op"] else 3]:
             st.success("已提交"); st.rerun()
 
 if role=="admin":
-    with tabs[4]:
+    with tabs[5]:
         st.subheader("用戶管理"); st.dataframe(load_df("Users"), use_container_width=True)
         with st.form("add_user", clear_on_submit=True):
             nu=st.text_input("用戶名"); np=st.text_input("密碼"); nn=st.text_input("姓名"); nr=st.selectbox("角色",["driver","op","admin"])
