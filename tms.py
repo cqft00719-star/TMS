@@ -304,4 +304,4 @@ if cost_idx is not None:
             st.success(f"已同步 {cnt} 單")
         df_cost=load_df("OrderCosts")
         if not df_cost.empty:
-            st.dataframe(df_cost.sort_values(by="JobID",ascending=False).head(200), use_container_width=True)
+            st.dataframe(df_cost.sort_values(by="JobID",ascending=False).head(200), use_container_width=True) 
