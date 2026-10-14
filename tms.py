@@ -9,49 +9,39 @@ import uuid, io, base64, requests, urllib.parse
 HKT = timezone(timedelta(hours=8))
 def now_hk(): return datetime.datetime.now(HKT)
 def today_hk(): return now_hk().date()
-st.set_page_config(page_title="TMS V39 CallMeBot", layout="wide", page_icon="🚚")
+st.set_page_config(page_title="TMS V40 MyTask+Expense Fixed", layout="wide", page_icon="🚚")
 
-FEE_MAP = {"油費":"隧道費","過路費":"登記費","維修":"交倉附加費","隧道":"隧道費"}
-NEW_FEES = ["隧道費","登記費","停車費","交倉附加費","其他"]
 UOM_OPTIONS = ["袋","箱","板","件","車","托","罐","樽","包","件","其他"]
+NEW_FEES = ["隧道費","登記費","停車費","交倉附加費","其他"]
 
 def send_whatsapp_to_ops(message):
     try:
         wa_cfg = st.secrets.get("whatsapp", {})
-        if not wa_cfg.get("enabled", False):
-            return False, "未啟用"
+        if not wa_cfg.get("enabled", False): return False, "未啟用"
         phones = wa_cfg.get("callmebot_phones", ["85260202131"])
         keys = wa_cfg.get("callmebot_apikeys", ["4480785"])
         ok=0
-        logs=[]
         for i,ph in enumerate(phones):
             key = keys[i] if i < len(keys) else keys[0]
             url = f"https://api.callmebot.com/whatsapp.php?phone={ph}&text={urllib.parse.quote(message)}&apikey={key}"
             try:
                 r = requests.get(url, timeout=15)
-                logs.append(r.text[:100])
                 if r.status_code==200: ok+=1
-            except Exception as e:
-                logs.append(str(e))
+            except: pass
         return True, f"已發 {ok}/{len(phones)}"
     except Exception as e:
         return False, str(e)
 
-def notify_new_order(job):
-    msg = f"🆕新Order {now_hk().strftime('%m/%d %H:%M')}\nJobID:{job.get('JobID')}\nClient:{job.get('Client')} Internal:{job.get('InternalNo')}\nFrom:{job.get('From')} {job.get('From_Contact')} {job.get('From_Phone')} 提貨:{job.get('PickupTime')}\nTo:{job.get('To')} {job.get('To_Contact')} {job.get('To_Phone')} 送貨:{job.get('DeliveryTime')}\n貨:{job.get('CargoDetail')}"
-    return send_whatsapp_to_ops(msg)
-def notify_status(jid,driver,status,client=""):
-    return send_whatsapp_to_ops(f"🔄{now_hk().strftime('%m/%d %H:%M')}\nJobID:{jid}\nClient:{client}\n司機:{driver} 已{status}")
-def notify_pod(jid,driver,client="",cnt=1):
-    return send_whatsapp_to_ops(f"✅{now_hk().strftime('%m/%d %H:%M')}\nJobID:{jid}\nClient:{client}\n司機:{driver} 已上傳{cnt}張POD Delivered")
+def notify_new_order(job): return send_whatsapp_to_ops(f"🆕新Order {now_hk().strftime('%m/%d %H:%M')}\nJobID:{job.get('JobID')}\nClient:{job.get('Client')} {job.get('From')}->{job.get('To')}\n貨:{job.get('CargoDetail')}")
+def notify_status(jid,driver,status,client=""): return send_whatsapp_to_ops(f"🔄{now_hk().strftime('%m/%d %H:%M')}\nJobID:{jid} Client:{client}\n司機:{driver} 已{status}")
+def notify_pod(jid,driver,client="",cnt=1): return send_whatsapp_to_ops(f"✅{now_hk().strftime('%m/%d %H:%M')}\nJobID:{jid} Client:{client}\n司機:{driver} 已上傳{cnt}張POD")
 
 @st.cache_resource
 def get_client():
     scopes = ["https://www.googleapis.com/auth/spreadsheets","https://www.googleapis.com/auth/drive"]
     creds = Credentials.from_service_account_info(st.secrets["gcp_service_account"], scopes=scopes)
     return gspread.authorize(creds)
-def get_sh():
-    return get_client().open_by_key(st.secrets["connections"]["gsheets"]["spreadsheet"])
+def get_sh(): return get_client().open_by_key(st.secrets["connections"]["gsheets"]["spreadsheet"])
 
 @st.cache_data(ttl=30)
 def load_df(tab):
@@ -70,14 +60,12 @@ def load_df(tab):
             if any(str(c).strip()!="" for c in r):
                 if len(r)<len(clean): r=r+[""]*(len(clean)-len(r))
                 rows.append(r[:len(clean)])
-        df=pd.DataFrame(rows, columns=clean)
-        return df
+        return pd.DataFrame(rows, columns=clean)
     except: return pd.DataFrame()
 
-def append_rows(tab, rows):
-    get_sh().worksheet(tab).append_rows(rows, value_input_option='USER_ENTERED')
+def append_row(tab,row):
+    get_sh().worksheet(tab).append_rows([row], value_input_option='USER_ENTERED')
     st.cache_data.clear()
-def append_row(tab,row): append_rows(tab,[row])
 def append_row_by_header(tab, data_dict):
     ws=get_sh().worksheet(tab)
     headers=[h.strip() for h in ws.row_values(1)]
@@ -114,10 +102,10 @@ def printable_order_html(job):
 
 if "user" not in st.session_state: st.session_state.user=None
 if not st.session_state.user:
-    st.title("TMS V39 CallMeBot 登入")
+    st.title("TMS V40 登入")
     df_u=load_df("Users")
     u=st.text_input("用戶名"); p=st.text_input("密碼",type="password")
-    if st.button("登入",type="primary",key="v39_login"):
+    if st.button("登入",type="primary",key="v40_login"):
         m=df_u[(df_u["username"].astype(str).str.strip()==u.strip()) & (df_u["password"].astype(str).str.strip()==p.strip())]
         if not m.empty: st.session_state.user=m.iloc[0].to_dict(); st.rerun()
         else: st.error("帳號錯")
@@ -130,38 +118,45 @@ ensure_sheets()
 user=st.session_state.user
 role=str(user.get("role","driver")).lower()
 operator=user.get("username","")
-st.sidebar.title(f"👤 {user.get('name')} ({role})")
-wa_enabled = st.secrets.get("whatsapp", {}).get("enabled", False)
-st.sidebar.caption(f"WhatsApp: {'🟢已啟用 85260202131' if wa_enabled else '🔴未啟用'}")
-if st.sidebar.button("登出", key="v39_logout"): st.session_state.user=None; st.cache_data.clear(); st.rerun()
-if st.sidebar.button("🔄 清除Cache", key="v39_clear"): st.cache_data.clear(); st.rerun()
+op_name=user.get("name","")
+st.sidebar.title(f"👤 {op_name} ({role})")
+st.sidebar.caption(f"WhatsApp: {'🟢已啟用' if st.secrets.get('whatsapp',{}).get('enabled',False) else '🔴未啟用'}")
+if st.sidebar.button("登出",key="v40_logout"): st.session_state.user=None; st.cache_data.clear(); st.rerun()
+if st.sidebar.button("🔄 清除Cache",key="v40_clear"): st.cache_data.clear(); st.rerun()
 with st.sidebar.expander("📱 測試WhatsApp"):
-    test_msg=st.text_area("測試訊息", value="TMS測試 85260202131")
-    if st.button("發送測試", key="v39_test_wa"):
-        ok,info=send_whatsapp_to_ops(test_msg)
-        if ok: st.success(info)
-        else: st.error(info)
+    if st.button("發送測試",key="v40_test_wa"):
+        ok,info=send_whatsapp_to_ops("TMS V40測試")
+        st.success(info) if ok else st.error(info)
 
 if role=="admin": tabs=st.tabs(["📊 Dashboard","📋 任務管理","📤 上傳Order","📸 上傳POD","💰 雜費","💵 每單費用","👥 用戶","🧹 維護"])
 elif role=="op": tabs=st.tabs(["📊 Dashboard","📋 任務管理","📤 上傳Order","📸 上傳POD","💰 雜費","💵 每單費用","🧹 維護"])
-else: tabs=st.tabs(["🟢 可接任務池","🚚 我的任務","📸 上傳POD","📋 重複打印"])
+else: tabs=st.tabs(["🟢 可接任務池","🚚 我的任務","📸 上傳POD","💰 雜費","📋 重複打印"])
 
 df_jobs=load_df("Jobs")
+df_exp=load_df("Expenses")
+
+def get_my_jobs(df):
+    if df.empty: return df
+    # 同時對 username 和 name
+    mask = df["Driver"].astype(str).str.strip().str.lower().isin([operator.lower(), op_name.lower()])
+    # 兼容舊資料如果Driver有空格
+    mask2 = df["Driver"].astype(str).str.contains(operator, na=False) | df["Driver"].astype(str).str.contains(op_name, na=False)
+    return df[mask | mask2]
 
 with tabs[0]:
     if role=="driver":
-        st.subheader("🟢 可接任務池 - 卡片+接單制")
+        st.subheader("🟢 可接任務池")
         if df_jobs.empty: st.info("暫無")
         else:
             df_pool=df_jobs[(df_jobs["Driver"].astype(str).str.strip()=="") & (df_jobs["Status"].astype(str).str.upper().isin(["PENDING",""]))]
-            if df_pool.empty: st.info("無可接")
+            if df_pool.empty: st.info("暫無可接")
             else:
                 for idx,row in df_pool.sort_values(by="JobID",ascending=False).iterrows():
                     jid=row.get("JobID","")
                     with st.container(border=True):
                         c1,c2=st.columns([4,1])
                         c1.markdown(f"**{jid}** | {row.get('Client','')} | {row.get('Date','')} {row.get('DeliveryTime','')} | Internal:{row.get('InternalNo','')}")
-                        if c2.button(f"🟢 搶此單",key=f"v39_claim_{jid}_{idx}",type="primary",use_container_width=True):
+                        if c2.button("🟢 搶此單",key=f"v40_claim_{jid}_{idx}",type="primary",use_container_width=True):
                             ws=get_sh().worksheet("Jobs")
                             headers=[h.strip() for h in ws.row_values(1)]
                             cell=ws.find(jid)
@@ -172,12 +167,9 @@ with tabs[0]:
                                 ok,info=notify_status(jid,operator,"Accepted",row.get('Client',''))
                                 st.success(f"已搶 {jid} | WhatsApp:{info}")
                                 st.rerun()
-                        cA,cB=st.columns(2)
-                        with cA: st.write(f"📦起點: {row.get('From','')} {row.get('From_Contact','')} {row.get('From_Phone','')} 提貨:{row.get('PickupTime','')}")
-                        with cB: st.write(f"🏁終點: {row.get('To','')} {row.get('To_Contact','')} {row.get('To_Phone','')} 送貨:{row.get('DeliveryTime','')}")
+                        st.write(f"📦 {row.get('From','')} {row.get('From_Contact','')} {row.get('From_Phone','')} 提貨:{row.get('PickupTime','')}")
+                        st.write(f"🏁 {row.get('To','')} {row.get('To_Contact','')} {row.get('To_Phone','')} 送貨:{row.get('DeliveryTime','')}")
                         st.code(row.get('CargoDetail',''))
-                        with st.expander(f"👁️ 預覽/打印 {jid}"):
-                            st.components.v1.html(printable_order_html(row.to_dict()),height=700,scrolling=True)
     else:
         st.subheader("📊 Dashboard")
         st.dataframe(df_jobs.head(50))
@@ -187,66 +179,50 @@ if role in ["admin","op"]:
         st.subheader("📋 任務管理")
         if not df_jobs.empty:
             st.dataframe(df_jobs.head(100),use_container_width=True)
-            opts=[f"{r['JobID']} | {r.get('Client','')} | {r.get('From','')}->{r.get('To','')}" for _,r in df_jobs.sort_values(by="JobID",ascending=False).head(100).iterrows()]
-            sel=st.selectbox("揀單打印",opts,key="v39_task_print")
-            if sel:
-                jid=sel.split(" | ")[0]
-                job=df_jobs[df_jobs["JobID"]==jid].iloc[0].to_dict()
-                st.components.v1.html(printable_order_html(job),height=850,scrolling=True)
 
 if role in ["admin","op"]:
     with tabs[2]:
-        st.subheader("📤 上傳Order + 自動WhatsApp Op")
+        st.subheader("📤 上傳Order + 自動WhatsApp")
         ZONES=["港島","九龍","新界","離島","機場","中港","澳門","內地","其他"]
         cb1,cb2,cb3=st.columns([3,1,1])
-        cb_prod=cb1.text_input("貨名",placeholder="FPCQHKGBP003",key="v39_cb_prod")
-        cb_qty=cb2.number_input("數量",min_value=1,value=40,step=1,key="v39_cb_qty")
-        cb_uom=cb3.selectbox("UOM",UOM_OPTIONS,index=6,key="v39_cb_uom")
-        if st.button("➕ 添加",key="v39_cb_add",type="primary"):
+        cb_prod=cb1.text_input("貨名",key="v40_cb_prod"); cb_qty=cb2.number_input("數量",min_value=1,value=40,step=1,key="v40_cb_qty"); cb_uom=cb3.selectbox("UOM",UOM_OPTIONS,index=6,key="v40_cb_uom")
+        if st.button("➕ 添加",key="v40_cb_add",type="primary"):
             if cb_prod.strip(): st.session_state.cargo_builder.append(f"{cb_prod.strip()} {int(cb_qty)}{cb_uom}")
         if st.session_state.cargo_builder: st.success(" | ".join(st.session_state.cargo_builder))
-        if st.button("🗑️ 清空",key="v39_cb_clear2"): st.session_state.cargo_builder=[]
-        with st.form("v39_form"):
-            c1,c2,c3=st.columns([2,1,1])
-            client=c1.text_input("客戶*"); internal_no=c2.text_input("Internal#"); zone=c3.selectbox("Zone*",ZONES,index=1)
-            c_date,c_pick,c_del=st.columns(3)
-            date=c_date.date_input("日期*",value=today_hk()); pickup_time=c_pick.text_input("提貨時間"); delivery_time=c_del.text_input("送貨時間*",placeholder="0900-1700")
-            c_from,c_from_c,c_from_p=st.columns([3,1,1])
-            from_loc=c_from.text_input("起點*"); from_contact=c_from_c.text_input("起點聯絡"); from_phone=c_from_p.text_input("起點電話")
-            c_to,c_to_c,c_to_p=st.columns([3,1,1])
-            to_loc=c_to.text_input("終點*"); to_contact=c_to_c.text_input("終點聯絡"); to_phone=c_to_p.text_input("終點電話")
-            cargo_detail=st.text_area("CargoDetail*",value="\n".join(st.session_state.cargo_builder),height=120)
-            notes=st.text_input("備註")
-            sub=st.form_submit_button("✅ 建立 + 自動WhatsApp通知Op",type="primary")
-            if sub:
-                if client.strip() and from_loc.strip() and to_loc.strip() and cargo_detail.strip():
-                    jid=f"JOB-{now_hk().strftime('%m%d%H%M')}-{str(uuid.uuid4())[:4].upper()}"
-                    job_dict={"JobID":jid,"Date":str(date),"Client":client,"Zone":zone,"From":from_loc,"From_Contact":from_contact,"From_Phone":from_phone,"PickupTime":pickup_time,"To":to_loc,"To_Contact":to_contact,"To_Phone":to_phone,"DeliveryTime":delivery_time,"CargoDetail":cargo_detail,"InternalNo":internal_no,"Notes":notes}
-                    append_row_by_header("Jobs",{"JobID":jid,"Date":str(date),"Client":client,"Zone":zone,"From":from_loc,"From_Contact":from_contact,"From_Phone":from_phone,"PickupTime":pickup_time,"To":to_loc,"To_Contact":to_contact,"To_Phone":to_phone,"DeliveryTime":delivery_time,"Driver":"","Status":"Pending","CargoDetail":cargo_detail,"InternalNo":internal_no,"Notes":notes,"CreatedBy":operator,"CreatedAt_HKT":now_hk().strftime("%Y-%m-%d %H:%M:%S HKT")})
-                    ok,info=notify_new_order(job_dict)
-                    st.session_state.last_job=job_dict
-                    st.session_state.cargo_builder=[]
-                    st.success(f"已建立 {jid} | WhatsApp:{info}")
-                    st.rerun()
-        if st.session_state.last_job:
-            st.components.v1.html(printable_order_html(st.session_state.last_job),height=850,scrolling=True)
+        if st.button("🗑️ 清空",key="v40_cb_clear2"): st.session_state.cargo_builder=[]
+        with st.form("v40_form"):
+            c1,c2,c3=st.columns([2,1,1]); client=c1.text_input("客戶*"); internal_no=c2.text_input("Internal#"); zone=c3.selectbox("Zone*",ZONES,index=1)
+            c_date,c_pick,c_del=st.columns(3); date=c_date.date_input("日期*",value=today_hk()); pickup_time=c_pick.text_input("提貨時間"); delivery_time=c_del.text_input("送貨時間*",placeholder="0900-1700")
+            c_from,c_from_c,c_from_p=st.columns([3,1,1]); from_loc=c_from.text_input("起點*"); from_contact=c_from_c.text_input("起點聯絡"); from_phone=c_from_p.text_input("起點電話")
+            c_to,c_to_c,c_to_p=st.columns([3,1,1]); to_loc=c_to.text_input("終點*"); to_contact=c_to_c.text_input("終點聯絡"); to_phone=c_to_p.text_input("終點電話")
+            cargo_detail=st.text_area("CargoDetail*",value="\n".join(st.session_state.cargo_builder),height=120); notes=st.text_input("備註")
+            sub=st.form_submit_button("✅ 建立 + WhatsApp通知Op",type="primary")
+            if sub and client.strip() and from_loc.strip() and to_loc.strip() and cargo_detail.strip():
+                jid=f"JOB-{now_hk().strftime('%m%d%H%M')}-{str(uuid.uuid4())[:4].upper()}"
+                job_dict={"JobID":jid,"Date":str(date),"Client":client,"Zone":zone,"From":from_loc,"From_Contact":from_contact,"From_Phone":from_phone,"PickupTime":pickup_time,"To":to_loc,"To_Contact":to_contact,"To_Phone":to_phone,"DeliveryTime":delivery_time,"CargoDetail":cargo_detail,"InternalNo":internal_no,"Notes":notes}
+                append_row_by_header("Jobs",{"JobID":jid,"Date":str(date),"Client":client,"Zone":zone,"From":from_loc,"From_Contact":from_contact,"From_Phone":from_phone,"PickupTime":pickup_time,"To":to_loc,"To_Contact":to_contact,"To_Phone":to_phone,"DeliveryTime":delivery_time,"Driver":"","Status":"Pending","CargoDetail":cargo_detail,"InternalNo":internal_no,"Notes":notes,"CreatedBy":operator,"CreatedAt_HKT":now_hk().strftime("%Y-%m-%d %H:%M:%S HKT")})
+                ok,info=notify_new_order(job_dict)
+                st.session_state.last_job=job_dict; st.session_state.cargo_builder=[]
+                st.success(f"已建立 {jid} | WhatsApp:{info}"); st.rerun()
+        if st.session_state.last_job: st.components.v1.html(printable_order_html(st.session_state.last_job),height=850,scrolling=True)
 
+# POD
 pod_idx=3 if role in ["admin","op"] else 2
 with tabs[pod_idx]:
     st.subheader("📸 上傳POD + 自動通知Op")
-    my_pool=df_jobs if role in ["admin","op"] else df_jobs[df_jobs["Driver"].astype(str).str.strip()==operator] if not df_jobs.empty else df_jobs
+    my_jobs = get_my_jobs(df_jobs) if role=="driver" else df_jobs
+    my_pool = my_jobs if not my_jobs.empty else df_jobs
     my_pool=my_pool.sort_values(by="JobID",ascending=False) if not my_pool.empty else my_pool
     if not my_pool.empty:
-        jid=st.selectbox("選擇JobID",my_pool["JobID"].tolist(),key="v39_pod_sel")
+        jid=st.selectbox("選擇JobID",my_pool["JobID"].tolist(),key="v40_pod_sel")
         sel_info=df_jobs[df_jobs["JobID"]==jid].iloc[0].to_dict() if not df_jobs[df_jobs["JobID"]==jid].empty else {}
-        st.info(f"Internal:{sel_info.get('InternalNo','')} | {str(sel_info.get('CargoDetail',''))[:100]}")
-        pod_files=st.file_uploader("拍照",type=["jpg","png","jpeg"],accept_multiple_files=True,key="v39_pod_files")
-        if pod_files and st.button(f"上傳 {len(pod_files)} 張 + 通知Op",type="primary",key="v39_up_pod"):
+        st.info(f"Internal:{sel_info.get('InternalNo','')} | {str(sel_info.get('CargoDetail',''))[:120]}")
+        pod_files=st.file_uploader("拍照",type=["jpg","png","jpeg"],accept_multiple_files=True,key="v40_pod_files")
+        if pod_files and st.button(f"上傳 {len(pod_files)} 張 + 通知Op",type="primary",key="v40_up_pod"):
             from PIL import Image
             for idx_file, pf in enumerate(pod_files):
                 try:
-                    img=Image.open(io.BytesIO(pf.getvalue())).convert("RGB")
-                    img.thumbnail((500,500))
+                    img=Image.open(io.BytesIO(pf.getvalue())).convert("RGB"); img.thumbnail((500,500))
                     buf=io.BytesIO(); img.save(buf,format="JPEG",quality=40,optimize=True)
                     fb=buf.getvalue(); b64=base64.b64encode(fb).decode(); data_url=f"data:image/jpeg;base64,{b64}"
                     fname=f"{jid}_POD_{now_hk().strftime('%Y%m%d_%H%M%S')}_{idx_file+1}.jpg"
@@ -260,3 +236,82 @@ with tabs[pod_idx]:
             ok,info=notify_pod(jid,operator,sel_info.get('Client',''),len(pod_files))
             st.cache_data.clear()
             st.success(f"已上傳 {len(pod_files)} 張 | WhatsApp:{info}")
+
+# 雜費 - driver + admin/op 都見到
+expense_idx = 4 if role=="admin" else 4 if role=="op" else 3
+with tabs[expense_idx]:
+    st.subheader("💰 雜費 - 隧道/登記/停車/交倉")
+    st.write(f"你而家用 {operator} 入數")
+    my_for_expense = get_my_jobs(df_jobs) if role=="driver" else df_jobs
+    if my_for_expense.empty:
+        st.info("暫無任務入雜費")
+    else:
+        my_for_expense=my_for_expense.sort_values(by="JobID",ascending=False)
+        sel_exp_jid=st.selectbox("揀JobID入雜費", my_for_expense["JobID"].tolist(), key="v40_exp_jid")
+        exp_info=df_jobs[df_jobs["JobID"]==sel_exp_jid].iloc[0].to_dict() if not df_jobs[df_jobs["JobID"]==sel_exp_jid].empty else {}
+        st.info(f"{sel_exp_jid} | {exp_info.get('Client','')} | {exp_info.get('From','')}->{exp_info.get('To','')} | {exp_info.get('InternalNo','')}")
+        c1,c2,c3=st.columns(3)
+        exp_type=c1.selectbox("費用類型", NEW_FEES, key="v40_exp_type")
+        exp_amount=c2.number_input("金額 $", min_value=0.0, step=1.0, key="v40_exp_amt")
+        exp_date=c3.date_input("日期", value=today_hk(), key="v40_exp_date")
+        exp_remark=st.text_input("備註 Remark", key="v40_exp_remark")
+        if st.button("✅ 提交雜費", type="primary", key="v40_exp_submit"):
+            if exp_amount>0:
+                exp_id=f"EXP-{now_hk().strftime('%m%d%H%M%S')}-{uuid.uuid4().hex[:4]}"
+                append_row("Expenses",[exp_id, str(exp_date), sel_exp_jid, operator, exp_type, str(exp_amount), exp_remark, now_hk().strftime("%Y-%m-%d %H:%M:%S HKT")])
+                ok,info=send_whatsapp_to_ops(f"💰{now_hk().strftime('%m/%d %H:%M')}\nJobID:{sel_exp_jid}\n司機:{operator} 申報 {exp_type} ${exp_amount}\n備註:{exp_remark}")
+                st.success(f"已入 {exp_type} ${exp_amount} | WhatsApp:{info}")
+                st.rerun()
+            else:
+                st.error("金額要>0")
+        st.divider()
+        st.markdown("**📋 我嘅雜費記錄**")
+        if not df_exp.empty:
+            my_exp = df_exp[df_exp["Driver"].astype(str).str.contains(operator, na=False) | df_exp["Driver"].astype(str).str.contains(op_name, na=False)] if role=="driver" else df_exp
+            if not my_exp.empty:
+                st.dataframe(my_exp.sort_values(by="ExpenseID",ascending=False).head(100), use_container_width=True)
+            else:
+                st.info("暫無雜費")
+        # 顯示總費用
+        if not df_exp.empty and sel_exp_jid in df_exp["JobID"].astype(str).values:
+            total = pd.to_numeric(df_exp[df_exp["JobID"]==sel_exp_jid]["Amount"], errors="coerce").sum()
+            st.metric(f"{sel_exp_jid} 總雜費", f"${total:.0f}")
+
+# driver 其他頁
+if role=="driver":
+    with tabs[1]:
+        st.subheader("🚚 我的任務 - 已搶到嘅單")
+        my_jobs = get_my_jobs(df_jobs)
+        if my_jobs.empty:
+            st.warning("暫無我的任務 (如果你剛搶完，撳左邊 🔄 清除Cache)")
+            st.write("Debug: 你而家登入 username=",operator," name=",op_name)
+            st.write("Jobs Driver欄有: ", df_jobs["Driver"].unique()[:10] if not df_jobs.empty else "無")
+            if st.button("🔄 強制刷新", key="v40_force_refresh"):
+                st.cache_data.clear(); st.rerun()
+        else:
+            for _, row in my_jobs.sort_values(by="JobID",ascending=False).iterrows():
+                with st.container(border=True):
+                    st.markdown(f"**{row.get('JobID')}** | {row.get('Status')} | {row.get('Client')} | Internal:{row.get('InternalNo')}")
+                    st.write(f"📦 {row.get('From')} -> 🏁 {row.get('To')} | 送貨:{row.get('DeliveryTime')}")
+                    st.write(f"聯絡: {row.get('To_Contact')} {row.get('To_Phone')}")
+                    st.code(row.get('CargoDetail',''))
+                    c1,c2=st.columns(2)
+                    if c1.button(f"📸 去上傳POD", key=f"v40_gopod_{row.get('JobID')}"):
+                        st.info("去 上傳POD Tab")
+                    if c2.button(f"🖨️ 打印此單", key=f"v40_print_my_{row.get('JobID')}"):
+                        st.components.v1.html(printable_order_html(row.to_dict()), height=800, scrolling=True)
+            st.dataframe(my_jobs, use_container_width=True)
+
+    with tabs[4]:
+        st.subheader("📋 重複打印")
+        if not df_jobs.empty:
+            search=st.text_input("搜尋", key="v40_driver_search_print")
+            df_f=df_jobs.copy()
+            if search.strip(): df_f=df_f[df_f.astype(str).apply(lambda x: x.str.contains(search, case=False, na=False)).any(axis=1)]
+            opts=[f"{r['JobID']} | {r.get('Client','')} | {r.get('From','')}->{r.get('To','')}" for _,r in df_f.sort_values(by="JobID",ascending=False).head(100).iterrows()]
+            if opts:
+                sel=st.selectbox("揀單打印", opts, key="v40_driver_print_sel")
+                if sel:
+                    jid=sel.split(" | ")[0]
+                    job=df_jobs[df_jobs["JobID"]==jid].iloc[0].to_dict()
+                    st.components.v1.html(printable_order_html(job), height=800, scrolling=True)
