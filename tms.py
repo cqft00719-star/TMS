@@ -199,22 +199,52 @@ if role in ["admin","op"]:
 
 pod_idx=3 if role in ["admin","op"] else 2
 with tabs[pod_idx]:
-    st.subheader("📸 上傳POD")
+    st.subheader("📸 上傳POD - V45.1 修復版")
+    st.info("✅ V45.1 已修復POD WhatsApp通知")
     my_jobs = get_my_jobs(df_jobs) if role=="driver" else df_jobs
     my_pool=my_jobs.sort_values(by="JobID",ascending=False) if not my_jobs.empty else df_jobs
-    if not my_pool.empty:
-        jid=st.selectbox("選擇JobID",my_pool["JobID"].tolist(),key="v45_pod_sel")
-        pod_files=st.file_uploader("拍照",type=["jpg","png","jpeg"],accept_multiple_files=True,key="v45_pod_files")
-        if pod_files and st.button(f"上傳 {len(pod_files)} 張",type="primary",key="v45_up_pod"):
-            from PIL import Image
-            for idx_file, pf in enumerate(pod_files):
-                img=Image.open(io.BytesIO(pf.getvalue())).convert("RGB"); img.thumbnail((500,500))
-                buf=io.BytesIO(); img.save(buf,format="JPEG",quality=40,optimize=True)
-                fb=buf.getvalue(); b64=base64.b64encode(fb).decode(); data_url=f"data:image/jpeg;base64,{b64}"
-                pod_id=f"POD-{now_hk().strftime('%m%d%H%M%S')}-{uuid.uuid4().hex[:4]}"
-                append_row("PODs",[pod_id,jid,f"{jid}_POD.jpg",str(len(fb)),data_url,operator,now_hk().strftime("%Y-%m-%d %H:%M:%S HKT"),now_hk().strftime("%Y-%m-%d %H:%M:%S HKT")])
-            send_whatsapp_to_ops(f"[V45]JobID:{jid} 司機:{operator} 已上傳{len(pod_files)}張POD")
-            st.cache_data.clear(); st.success("已上傳")
+    if my_pool.empty:
+        st.warning("暫無任務")
+    else:
+        jid_outside=st.selectbox("選擇JobID (先揀)",my_pool["JobID"].tolist(),key="v45_1_pod_sel_outside")
+        sel_job_info = df_jobs[df_jobs["JobID"]==jid_outside].iloc[0].to_dict() if not df_jobs[df_jobs["JobID"]==jid_outside].empty else {}
+        st.success(f"已選: {jid_outside} | {sel_job_info.get('Client','')}")
+
+        with st.form("v45_1_pod_form", clear_on_submit=True):
+            jid = st.selectbox("最終確認JobID", [jid_outside], key="v45_1_pod_sel_inside")
+            pod_files=st.file_uploader("📷 拍照上傳POD (可多張)",type=["jpg","png","jpeg"],accept_multiple_files=True,key="v45_1_pod_files")
+            submit_pod = st.form_submit_button(f"📤 上傳POD + WhatsApp通知", type="primary", use_container_width=True)
+
+            if submit_pod:
+                if not pod_files:
+                    st.error("請先選擇相片")
+                else:
+                    st.write(f"🔍 DEBUG V45.1 收到 {len(pod_files)} 張相，JobID:{jid}")
+                    from PIL import Image
+                    count_ok=0
+                    for idx_file, pf in enumerate(pod_files):
+                        try:
+                            img=Image.open(io.BytesIO(pf.getvalue())).convert("RGB"); img.thumbnail((800,800))
+                            buf=io.BytesIO(); img.save(buf,format="JPEG",quality=50,optimize=True)
+                            fb=buf.getvalue(); b64=base64.b64encode(fb).decode(); data_url=f"data:image/jpeg;base64,{b64}"
+                            pod_id=f"POD-{now_hk().strftime('%m%d%H%M%S')}-{uuid.uuid4().hex[:4]}"
+                            append_row("PODs",[pod_id,jid,f"{jid}_POD_{now_hk().strftime('%Y%m%d_%H%M%S')}_{idx_file+1}.jpg",str(len(fb)),data_url,operator,now_hk().strftime("%Y-%m-%d %H:%M:%S HKT"),now_hk().strftime("%Y-%m-%d %H:%M:%S HKT")])
+                            count_ok+=1
+                        except Exception as e:
+                            st.error(f"相片 {idx_file+1} 失敗: {e}")
+
+                    # 更新Jobs狀態為Delivered
+                    try:
+                        ws=get_sh().worksheet("Jobs"); headers=[h.strip() for h in ws.row_values(1)]; cell=ws.find(jid)
+                        if cell and "Status" in headers:
+                            ws.update_cell(cell.row, headers.index("Status")+1, "Delivered")
+                    except: pass
+
+                    msg = f"[V45.1 POD]{now_hk().strftime('%m/%d %H:%M')} JobID:{jid} 司機:{operator} 已上傳{count_ok}張POD"
+                    ok,info=send_whatsapp_to_ops(msg)
+                    st.cache_data.clear()
+                    st.success(f"🎉 成功上傳 {count_ok} 張POD | WhatsApp:{info}")
+                    st.code(msg)
 
 # ==================== V45 雜費終極修復 ====================
 expense_idx = 4 if role in ["admin","op"] else 3
