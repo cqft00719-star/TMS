@@ -4,24 +4,27 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>2CM TMS V45.9</title>
-<link rel="manifest" href="./manifest.json">
-<link rel="icon" href="./icon-192.png">
+<link rel="manifest" href="./manifest.json?v=2">
+<link rel="icon" href="./icon-192.png?v=2">
 <meta name="theme-color" content="#1052A8">
 <style>
-body{margin:0;font-family:system-ui;background:#1052A8;color:#fff;display:flex;align-items:center;justify-content:center;height:100vh;flex-direction:column}
+body{margin:0;font-family:system-ui;background:#1052A8;color:#fff;display:flex;align-items:center;justify-content:center;height:100vh;flex-direction:column;text-align:center;padding:20px}
 .loader{width:48px;height:48px;border:4px solid rgba(255,255,255,.3);border-top-color:#fff;border-radius:50%;animation:spin 1s linear infinite}
 @keyframes spin{to{transform:rotate(360deg)}}
+.btn{margin-top:20px;background:#fff;color:#1052A8;padding:12px 24px;border-radius:8px;text-decoration:none;font-weight:bold}
 a{color:#fff}
 </style>
 <script>
 setTimeout(function(){
   window.location.replace("https://yxdrgxqzzfharz93pw5rqs.streamlit.app/");
-}, 800);
+}, 5000);
 </script>
 </head>
 <body>
 <div class="loader"></div>
-<p style="margin-top:16px">載入 2CM TMS V45.9...</p>
-<p style="font-size:12px;opacity:.8">如未自動跳轉，<a href="https://yxdrgxqzzfharz93pw5rqs.streamlit.app/">按此</a></p>
+<h2 style="margin-top:16px">2CM TMS V45.9</h2>
+<p>5秒後自動跳去系統...</p>
+<p style="font-size:12px;opacity:.8">想裝藍色Icon，請喺跳轉前按Chrome三點 -> 加到主畫面</p>
+<a class="btn" href="https://yxdrgxqzzfharz93pw5rqs.streamlit.app/">立即進入TMS</a>
 </body>
 </html>
