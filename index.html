@@ -1,13 +1,27 @@
 <!DOCTYPE html>
-<html>
+<html lang="zh-Hant">
 <head>
 <meta charset="utf-8">
-<title>2CM TMS</title>
-<link rel="manifest" href="manifest.json">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>2CM TMS V45.9</title>
+<link rel="manifest" href="./manifest.json">
+<link rel="icon" href="./icon-192.png">
+<meta name="theme-color" content="#1052A8">
+<style>
+body{margin:0;font-family:system-ui;background:#1052A8;color:#fff;display:flex;align-items:center;justify-content:center;height:100vh;flex-direction:column}
+.loader{width:48px;height:48px;border:4px solid rgba(255,255,255,.3);border-top-color:#fff;border-radius:50%;animation:spin 1s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+a{color:#fff}
+</style>
+<script>
+setTimeout(function(){
+  window.location.replace("https://yxdrgxqzzfharz93pw5rqs.streamlit.app/");
+}, 800);
+</script>
 </head>
 <body>
-<h1>2CM TMS V45.9</h1>
-<p>Loading...</p>
-<script>location.href="https://yxdrgxqzzfharz93pw5rqs.streamlit.app/"</script>
+<div class="loader"></div>
+<p style="margin-top:16px">載入 2CM TMS V45.9...</p>
+<p style="font-size:12px;opacity:.8">如未自動跳轉，<a href="https://yxdrgxqzzfharz93pw5rqs.streamlit.app/">按此</a></p>
 </body>
 </html>
