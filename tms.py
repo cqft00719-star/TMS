@@ -19,7 +19,7 @@ ULTRAMSG_INSTANCE = "instance194419"
 ULTRAMSG_TOKEN = "ji5hd4t2li7vf3ys"
 # 你個Group invite link: https://chat.whatsapp.com/LDpCXHy67pf72sPPrcgos4
 # 下面呢個係你真Group ID，跑一次後台會自動填，格式就係你張圖嗰種 xxxx@g.us
-ULTRAMSG_GROUP_ID = "120363421204082213@g.us" # 呢個係你Group Link對應嘅真ID，如果唔啱，Sidebar會自動列出俾你揀
+ULTRAMSG_GROUP_ID = "120363413020795341@g.us" # 呢個係你Group Link對應嘅真ID，如果唔啱，Sidebar會自動列出俾你揀
 
 def send_ultramsg_message(to, body):
     try:
