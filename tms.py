@@ -17,9 +17,7 @@ NEW_FEES = ["隧道費","登記費","停車費","交倉附加費","其他"]
 # ===== V45.9 Ultramsg Group 最終設定 (已寫死) =====
 ULTRAMSG_INSTANCE = "instance194419"
 ULTRAMSG_TOKEN = "ji5hd4t2li7vf3ys"
-# 你個Group invite link: https://chat.whatsapp.com/LDpCXHy67pf72sPPrcgos4
-# 下面呢個係你真Group ID，跑一次後台會自動填，格式就係你張圖嗰種 xxxx@g.us
-ULTRAMSG_GROUP_ID = "120363413020795341@g.us" # 呢個係你Group Link對應嘅真ID，如果唔啱，Sidebar會自動列出俾你揀
+ULTRAMSG_GROUP_ID = "120363413020795341@g.us"
 
 def send_ultramsg_message(to, body):
     try:
@@ -31,25 +29,20 @@ def send_ultramsg_message(to, body):
         return False, str(e)
 
 def send_whatsapp_to_ops(message):
-    # V45.9: 淨係發去Group，新同事入Group即收到，唔使申請
     try:
-        # 1. 優先發去Group ID
         if ULTRAMSG_GROUP_ID and "@g.us" in ULTRAMSG_GROUP_ID:
             ok, info = send_ultramsg_message(ULTRAMSG_GROUP_ID, message)
             if ok:
                 return True, f"Ultramsg Group已發 {ULTRAMSG_GROUP_ID}"
-        # 2. Secrets覆蓋
         wa_cfg = st.secrets.get("ultramsg", {})
         for p in wa_cfg.get("phones", []):
             if "@g.us" in str(p):
                 ok, info = send_ultramsg_message(p, message)
                 if ok: return True, f"Ultramsg Group已發 {p}"
-        # 3. Fallback發去個人 (6020/6432)
         for ph in ["85260202131","85264328390"]:
             ok, _ = send_ultramsg_message(ph, message)
             if ok: return True, f"Ultramsg個人已發 {ph}"
     except: pass
-    # 舊CallMeBot備用
     try:
         wa_cfg = st.secrets.get("whatsapp", {})
         if wa_cfg.get("enabled", False):
@@ -245,7 +238,7 @@ if role in ["admin","op"]:
                         st.components.v1.html(printable_order_html(row.to_dict()), height=750, scrolling=True)
                         if st.button("❌ 關閉打印", key=f"v45_9_close_{jid}_{idx}"): st.session_state[f"print_{jid}"] = False; st.rerun()
     with tabs[2]:
-        st.subheader("📤 上傳Order - V45.9 完整版")
+        st.subheader("📤 上傳Order - V45.9 完整版 (已還原 + 加Date選擇)")
         with st.expander("📊 Excel批量上傳 + Template下載 (V45.9)", expanded=True):
             template_df = pd.DataFrame([{"Client":"和利鋼鐵有限公司", "Zone":"九龍", "From":"SGL J倉", "From_Contact":"Henry", "From_Phone":"", "PickupTime":"900", "To":"大角咀通州街95-97號恒生中心4樓全層", "To_Contact":"Jojo Leung", "To_Phone":"6537 0983", "DeliveryTime":"0900-1700", "CargoDetail":"PKG005_V03 8件\nFPCQH...", "InternalNo":"3CORP9120940", "Date":str(today_hk()), "Notes":""}])
             buf = io.BytesIO()
@@ -267,7 +260,11 @@ if role in ["admin","op"]:
                         st.success(f"🎉 批量建立 {created} 單成功！WhatsApp Group:{info}"); st.code(msg); st.cache_data.clear()
                 except Exception as e: st.error(f"Excel讀取失敗: {e}")
         st.divider()
+        # ===== V45.9.1 修改：人手上傳加返Date選擇 =====
         with st.form("v45_9_order_form_full"):
+            st.markdown("#### 📅 訂單日期")
+            order_date = st.date_input("📅 選擇訂單日期 (Date)*", value=today_hk(), key="v45_9_manual_date")
+            st.divider()
             colA, colB = st.columns(2)
             with colA:
                 client=st.text_input("客戶* (Client)"); zone=st.selectbox("Zone", ["", "HKI","KLN","NT","九龍","香港","新界","離島","OTHER"], key="v45_9_zone")
@@ -280,16 +277,16 @@ if role in ["admin","op"]:
                 if not client or not from_loc or not to_loc or not cargo: st.error("請填寫 客戶* 起點* 終點* 貨物詳情*")
                 else:
                     jid=f"JOB-{now_hk().strftime('%m%d%H%M')}-{str(uuid.uuid4())[:4].upper()}"
-                    data={"JobID":jid, "Date":str(today_hk()), "Client":client, "Zone":zone, "From":from_loc, "From_Contact":from_contact, "From_Phone":from_phone, "PickupTime":pickup_time, "To":to_loc, "To_Contact":to_contact, "To_Phone":to_phone, "DeliveryTime":delivery_time, "CargoDetail":cargo, "InternalNo":internal_no, "Notes":notes, "Status":"Pending", "Driver":"", "CreatedBy":operator, "CreatedAt_HKT":now_hk().strftime("%Y-%m-%d %H:%M:%S HKT")}
-                    append_row_by_header("Jobs", data); sync_order_costs_sheet(); send_whatsapp_to_ops(f"[V45.9]新Order {jid} {client} Internal:{internal_no} {from_loc}->{to_loc}")
-                    st.success(f"🎉 已建立 {jid} Internal:{internal_no}"); st.session_state["last_created_job"] = data
+                    data={"JobID":jid, "Date":str(order_date), "Client":client, "Zone":zone, "From":from_loc, "From_Contact":from_contact, "From_Phone":from_phone, "PickupTime":pickup_time, "To":to_loc, "To_Contact":to_contact, "To_Phone":to_phone, "DeliveryTime":delivery_time, "CargoDetail":cargo, "InternalNo":internal_no, "Notes":notes, "Status":"Pending", "Driver":"", "CreatedBy":operator, "CreatedAt_HKT":now_hk().strftime("%Y-%m-%d %H:%M:%S HKT")}
+                    append_row_by_header("Jobs", data); sync_order_costs_sheet(); send_whatsapp_to_ops(f"[V45.9]新Order {jid} {client} Internal:{internal_no} Date:{order_date} {from_loc}->{to_loc}")
+                    st.success(f"🎉 已建立 {jid} Internal:{internal_no} Date:{order_date}"); st.session_state["last_created_job"] = data
         if "last_created_job" in st.session_state:
             st.divider(); st.subheader(f"🖨️ 剛建立嘅單 {st.session_state['last_created_job'].get('JobID','')} - V37格式")
             st.components.v1.html(printable_order_html(st.session_state["last_created_job"]), height=750, scrolling=True)
 
 pod_idx=3 if role in ["admin","op"] else 2
 with tabs[pod_idx]:
-    st.subheader("📸 上傳POD - V45.9")
+    st.subheader("📸 上傳POD - V45.9 (已修復APIError)")
     my_jobs = get_my_jobs(df_jobs) if role=="driver" else df_jobs; my_pool=my_jobs.sort_values(by="JobID",ascending=False) if not my_jobs.empty else df_jobs
     if my_pool.empty: st.warning("暫無任務")
     else:
@@ -301,17 +298,29 @@ with tabs[pod_idx]:
                 if not pod_files: st.error("請先選擇相片")
                 else:
                     count_ok=0
+                    errors=[]
                     for idx_file, pf in enumerate(pod_files):
-                        img=Image.open(io.BytesIO(pf.getvalue())).convert("RGB"); img.thumbnail((800,800))
-                        buf=io.BytesIO(); img.save(buf,format="JPEG",quality=50,optimize=True); fb=buf.getvalue(); b64=base64.b64encode(fb).decode(); data_url=f"data:image/jpeg;base64,{b64}"
-                        pod_id=f"POD-{now_hk().strftime('%m%d%H%M%S')}-{uuid.uuid4().hex[:4]}"
-                        append_row("PODs",[pod_id,jid,f"{jid}_POD_{now_hk().strftime('%Y%m%d_%H%M%S')}_{idx_file+1}.jpg",str(len(fb)),data_url,operator,now_hk().strftime("%Y-%m-%d %H:%M:%S HKT"),now_hk().strftime("%Y-%m-%d %H:%M:%S HKT")]); count_ok+=1
+                        try:
+                            img=Image.open(io.BytesIO(pf.getvalue())).convert("RGB")
+                            img.thumbnail((600,600))
+                            buf=io.BytesIO(); img.save(buf,format="JPEG",quality=40,optimize=True); fb=buf.getvalue()
+                            if len(fb) > 35000:
+                                img.thumbnail((500,500))
+                                buf=io.BytesIO(); img.save(buf,format="JPEG",quality=30,optimize=True); fb=buf.getvalue()
+                            b64=base64.b64encode(fb).decode(); data_url=f"data:image/jpeg;base64,{b64}"
+                            pod_id=f"POD-{now_hk().strftime('%m%d%H%M%S')}-{uuid.uuid4().hex[:4]}"
+                            append_row("PODs",[pod_id,jid,f"{jid}_POD_{now_hk().strftime('%Y%m%d_%H%M%S')}_{idx_file+1}.jpg",str(len(fb)),data_url,operator,now_hk().strftime("%Y-%m-%d %H:%M:%S HKT"),now_hk().strftime("%Y-%m-%d %H:%M:%S HKT")]); count_ok+=1
+                        except Exception as e:
+                            errors.append(str(e))
                     try:
                         ws=get_sh().worksheet("Jobs"); headers=[h.strip() for h in ws.row_values(1)]; cell=ws.find(jid)
                         if cell and "Status" in headers: ws.update_cell(cell.row, headers.index("Status")+1, "Delivered")
                     except: pass
-                    msg = f"[V45.9 POD]{now_hk().strftime('%m/%d %H:%M')} JobID:{jid} 司機:{operator} 已上傳{count_ok}張POD"; ok,info=send_whatsapp_to_ops(msg)
-                    st.cache_data.clear(); st.success(f"🎉 V45.9成功上傳 {count_ok} 張POD | WhatsApp Group:{info}"); st.code(msg)
+                    if count_ok>0:
+                        msg = f"[V45.9 POD]{now_hk().strftime('%m/%d %H:%M')} JobID:{jid} 司機:{operator} 已上傳{count_ok}張POD"; ok,info=send_whatsapp_to_ops(msg)
+                        st.cache_data.clear(); st.success(f"🎉 V45.9成功上傳 {count_ok} 張POD | WhatsApp Group:{info}"); st.code(msg)
+                    if errors:
+                        st.error(f"有 {len(errors)} 張失敗: {errors[0][:500]}")
 
 expense_idx = 4 if role in ["admin","op"] else 3
 with tabs[expense_idx]:
