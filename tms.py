@@ -27,16 +27,33 @@ def send_ultramsg_message(to, body):
     except Exception as e:
         return False, str(e)
 
-# === 新增：發Excel附件 ===
+# === 修復：發Excel附件 - 改用Base64，跟WMS最終版一樣 ===
 def send_ultramsg_document(to, file_path, caption=""):
     try:
-        url = f"https://api.ultramsg.com/{ULTRAMSG_INSTANCE}/messages/document"
         with open(file_path, "rb") as f:
-            files = {"document": f}
-            data = {"token": ULTRAMSG_TOKEN, "to": to, "filename": os.path.basename(file_path), "caption": caption}
-            r = requests.post(url, data=data, files=files, timeout=30)
-            return r.status_code == 200, r.text[:1000]
+            b64 = base64.b64encode(f.read()).decode("utf-8")
+        
+        url = f"https://api.ultramsg.com/{ULTRAMSG_INSTANCE}/messages/document"
+        payload = {
+            "token": ULTRAMSG_TOKEN,
+            "to": to,
+            "document": b64,
+            "filename": os.path.basename(file_path),
+            "caption": caption
+        }
+        r = requests.post(url, data=payload, timeout=60)
+        # Debug顯示，同WMS一樣
+        try:
+            st.sidebar.code(f"Base64 Len: {len(b64)}\nUltraMsg: {r.status_code}\n{r.text[:1000]}")
+        except:
+            pass
+        return r.status_code == 200, r.text[:1000]
     except Exception as e:
+        import traceback
+        try:
+            st.sidebar.code(traceback.format_exc()[:1500])
+        except:
+            pass
         return False, str(e)
 
 def send_whatsapp_to_ops(message):
@@ -61,10 +78,8 @@ def send_whatsapp_to_ops(message):
 
 # === 新增：新公司訂單Template解析 ===
 def parse_company_export_template(file):
-    # 呢個Template第1行係標題，第2行先係header
     df = pd.read_excel(file, sheet_name=0, header=1, dtype=str).fillna("")
     df.columns = [str(c).strip() for c in df.columns]
-    # 過濾合計行
     if "要貨單號" in df.columns:
         df = df[~df["要貨單號"].astype(str).str.contains("合計|總計|", na=False)]
         df = df[df["要貨單號"].astype(str).str.strip()!=""]
@@ -82,13 +97,12 @@ def parse_company_export_template(file):
         df["貨單號"] = df["要貨單號"].astype(str)
     return df
 
-# === 新增：每日自動生成Excel附件 ===
+# === 每日自動生成Excel附件 - 已修復用Base64 ===
 def generate_and_send_daily_excel():
     df_jobs = load_df("Jobs")
     if df_jobs.empty:
         send_ultramsg_message(ULTRAMSG_GROUP_ID, f"📦 TMS每日提醒 {now_hk().strftime('%Y-%m-%d')} 未來兩日無Order")
         return False
-    # 搵日期欄
     date_col = None
     for c in ["Date","送貨日期","DeliveryDate"]:
         if c in df_jobs.columns:
@@ -103,10 +117,7 @@ def generate_and_send_daily_excel():
     if filtered.empty:
         send_ultramsg_message(ULTRAMSG_GROUP_ID, f"📦 TMS每日提醒 {now_hk().strftime('%Y-%m-%d')} 聽日 {tomorrow} 同後日 {day_after} 無Order")
         return False
-    # 生成新Template格式Excel附件
     out_path = f"/tmp/TMS_Orders_{tomorrow}_to_{day_after}.xlsx"
-    # 盡量用新Template欄位導出：要貨單號=InternalNo, 商品編碼等從CargoDetail拆唔到就直接導出原表
-    # 為咗附件清晰，導出 InternalNo / Client / From / To / CargoDetail / Date
     export_cols = [c for c in ["InternalNo","JobID","Date","Client","Zone","From","To","CargoDetail","DeliveryTime","Notes"] if c in filtered.columns]
     filtered[export_cols].to_excel(out_path, index=False)
     caption = f"📦 TMS每日提醒 {now_hk().strftime('%Y-%m-%d %H:%M HKT')}\n聽日 {tomorrow} 同後日 {day_after} 共有 {len(filtered)} 張單\n已按新Template (要貨單號=InternalNo, CargoDetail含 商品編碼/名稱/數量/單位) 整理，詳見附件"
@@ -246,7 +257,7 @@ if st.sidebar.button("📋 列出我所有Group ID",key="v45_9_list_groups"):
 if st.sidebar.button("📦 測試每日Excel附件發送",key="v45_9_test_daily_excel"):
     with st.spinner("生成緊聽日+後日Excel..."):
         ok = generate_and_send_daily_excel()
-        if ok: st.sidebar.success("✅ Excel附件已發去Group")
+        if ok: st.sidebar.success("✅ Excel附件已發去Group - 已修復為真.xlsx")
         else: st.sidebar.warning("今日無單或發送失敗，已發文字通知")
 
 if role=="admin": tabs=st.tabs(["📊 Dashboard","📋 任務管理","📤 上傳Order","📸 上傳POD","💰 雜費","💵 每單費用","📥 下載POD"])
@@ -315,7 +326,6 @@ if role in ["admin","op"]:
             up_file = st.file_uploader("📤 上傳Excel批量建立 (支援舊模板 + 新公司订单导出模板)", type=["xlsx"], key="v45_9_excel_uploader")
             if up_file:
                 try:
-                    # 自動判斷係咪新公司模板
                     xls = pd.ExcelFile(up_file)
                     df_check = pd.read_excel(up_file, sheet_name=0, header=1, nrows=2)
                     is_new_template = "要貨單號" in df_check.columns or "商品編碼" in str(df_check.columns)
@@ -330,9 +340,7 @@ if role in ["admin","op"]:
                     if st.button(f"✅ 確認批量建立 {len(df_up)} 單 (只發1條去Group)", type="primary", use_container_width=True, key="v45_9_excel_confirm"):
                         created = 0
                         for _, r in df_up.iterrows():
-                            # 新模板轉舊Jobs格式
                             if is_new_template:
-                                # 商戶名稱->Client, 收貨地址->To, 送貨日期->Date, 整單備注->Notes
                                 client = str(r.get("商戶名稱","") or r.get("Client",""))
                                 to_addr = str(r.get("收貨地址","") or r.get("To",""))
                                 date_val = str(r.get("送貨日期","") or r.get("Date","") or today_hk())
