@@ -4,7 +4,7 @@ import gspread
 from google.oauth2.service_account import Credentials
 import datetime
 from datetime import timezone, timedelta
-import uuid, io, base64, requests, urllib.parse, zipfile
+import uuid, io, base64, requests, urllib.parse, zipfile, os
 from PIL import Image, ImageDraw, ImageFont
 
 HKT = timezone(timedelta(hours=8))
@@ -27,8 +27,19 @@ def send_ultramsg_message(to, body):
     except Exception as e:
         return False, str(e)
 
+# === 新增：發Excel附件 ===
+def send_ultramsg_document(to, file_path, caption=""):
+    try:
+        url = f"https://api.ultramsg.com/{ULTRAMSG_INSTANCE}/messages/document"
+        with open(file_path, "rb") as f:
+            files = {"document": f}
+            data = {"token": ULTRAMSG_TOKEN, "to": to, "filename": os.path.basename(file_path), "caption": caption}
+            r = requests.post(url, data=data, files=files, timeout=30)
+            return r.status_code == 200, r.text[:1000]
+    except Exception as e:
+        return False, str(e)
+
 def send_whatsapp_to_ops(message):
-    # V45.9.2 強制只用Ultramsg，唔用CallMeBot
     try:
         if ULTRAMSG_GROUP_ID and "@g.us" in ULTRAMSG_GROUP_ID:
             ok, info = send_ultramsg_message(ULTRAMSG_GROUP_ID, message)
@@ -47,6 +58,60 @@ def send_whatsapp_to_ops(message):
     except Exception as e:
         return False, f"Ultramsg異常: {e}"
     return False, "Ultramsg發送失敗"
+
+# === 新增：新公司訂單Template解析 ===
+def parse_company_export_template(file):
+    # 呢個Template第1行係標題，第2行先係header
+    df = pd.read_excel(file, sheet_name=0, header=1, dtype=str).fillna("")
+    df.columns = [str(c).strip() for c in df.columns]
+    # 過濾合計行
+    if "要貨單號" in df.columns:
+        df = df[~df["要貨單號"].astype(str).str.contains("合計|總計|", na=False)]
+        df = df[df["要貨單號"].astype(str).str.strip()!=""]
+    def make_cargo(row):
+        code = str(row.get("商品編碼","")).strip()
+        name = str(row.get("商品名稱","")).strip()
+        qty = str(row.get("要货数量","")).strip()
+        uom = str(row.get("要貨單位","")).strip()
+        if code or name:
+            return f"{code} {name} x{qty}{uom}".strip()
+        return ""
+    if "商品編碼" in df.columns:
+        df["CargoDetail"] = df.apply(make_cargo, axis=1)
+        df["InternalNo"] = df["要貨單號"].astype(str)
+        df["貨單號"] = df["要貨單號"].astype(str)
+    return df
+
+# === 新增：每日自動生成Excel附件 ===
+def generate_and_send_daily_excel():
+    df_jobs = load_df("Jobs")
+    if df_jobs.empty:
+        send_ultramsg_message(ULTRAMSG_GROUP_ID, f"📦 TMS每日提醒 {now_hk().strftime('%Y-%m-%d')} 未來兩日無Order")
+        return False
+    # 搵日期欄
+    date_col = None
+    for c in ["Date","送貨日期","DeliveryDate"]:
+        if c in df_jobs.columns:
+            date_col = c
+            break
+    if not date_col:
+        return False
+    df_jobs[date_col] = pd.to_datetime(df_jobs[date_col], errors="coerce")
+    tomorrow = today_hk() + datetime.timedelta(days=1)
+    day_after = tomorrow + datetime.timedelta(days=1)
+    filtered = df_jobs[df_jobs[date_col].dt.date.isin([tomorrow, day_after])]
+    if filtered.empty:
+        send_ultramsg_message(ULTRAMSG_GROUP_ID, f"📦 TMS每日提醒 {now_hk().strftime('%Y-%m-%d')} 聽日 {tomorrow} 同後日 {day_after} 無Order")
+        return False
+    # 生成新Template格式Excel附件
+    out_path = f"/tmp/TMS_Orders_{tomorrow}_to_{day_after}.xlsx"
+    # 盡量用新Template欄位導出：要貨單號=InternalNo, 商品編碼等從CargoDetail拆唔到就直接導出原表
+    # 為咗附件清晰，導出 InternalNo / Client / From / To / CargoDetail / Date
+    export_cols = [c for c in ["InternalNo","JobID","Date","Client","Zone","From","To","CargoDetail","DeliveryTime","Notes"] if c in filtered.columns]
+    filtered[export_cols].to_excel(out_path, index=False)
+    caption = f"📦 TMS每日提醒 {now_hk().strftime('%Y-%m-%d %H:%M HKT')}\n聽日 {tomorrow} 同後日 {day_after} 共有 {len(filtered)} 張單\n已按新Template (要貨單號=InternalNo, CargoDetail含 商品編碼/名稱/數量/單位) 整理，詳見附件"
+    ok, info = send_ultramsg_document(ULTRAMSG_GROUP_ID, out_path, caption)
+    return ok
 
 def watermark_pod_image(b64_data_url, job_id, internal_no=""):
     try:
@@ -178,6 +243,11 @@ if st.sidebar.button("📋 列出我所有Group ID",key="v45_9_list_groups"):
         if isinstance(data, list):
             for g in data: st.sidebar.code(f"{g.get('name')} -> {g.get('id')}")
     except Exception as e: st.sidebar.error(str(e))
+if st.sidebar.button("📦 測試每日Excel附件發送",key="v45_9_test_daily_excel"):
+    with st.spinner("生成緊聽日+後日Excel..."):
+        ok = generate_and_send_daily_excel()
+        if ok: st.sidebar.success("✅ Excel附件已發去Group")
+        else: st.sidebar.warning("今日無單或發送失敗，已發文字通知")
 
 if role=="admin": tabs=st.tabs(["📊 Dashboard","📋 任務管理","📤 上傳Order","📸 上傳POD","💰 雜費","💵 每單費用","📥 下載POD"])
 elif role=="op": tabs=st.tabs(["📊 Dashboard","📋 任務管理","📤 上傳Order","📸 上傳POD","💰 雜費","💵 每單費用","📥 下載POD"])
@@ -234,23 +304,45 @@ if role in ["admin","op"]:
                         st.components.v1.html(printable_order_html(row.to_dict()), height=750, scrolling=True)
                         if st.button("❌ 關閉打印", key=f"v45_9_close_{jid}_{idx}"): st.session_state[f"print_{jid}"] = False; st.rerun()
     with tabs[2]:
-        st.subheader("📤 上傳Order - V45.9 完整版")
-        with st.expander("📊 Excel批量上傳 + Template下載 (V45.9)", expanded=True):
+        st.subheader("📤 上傳Order - V45.9 完整版 + 新公司訂單模板")
+        with st.expander("📊 Excel批量上傳 + Template下載 (V45.9 + 新公司模板)", expanded=True):
             template_df = pd.DataFrame([{"Client":"和利鋼鐵有限公司", "Zone":"九龍", "From":"SGL J倉", "From_Contact":"Henry", "From_Phone":"", "PickupTime":"900", "To":"大角咀通州街95-97號恒生中心4樓全層", "To_Contact":"Jojo Leung", "To_Phone":"6537 0983", "DeliveryTime":"0900-1700", "CargoDetail":"PKG005_V03 8件\nFPCQH...", "InternalNo":"3CORP9120940", "Date":str(today_hk()), "Notes":""}])
             buf = io.BytesIO()
             with pd.ExcelWriter(buf, engine='openpyxl') as writer: template_df.to_excel(writer, index=False, sheet_name="Orders")
             buf.seek(0)
-            st.download_button("📥 下載Excel模板 Template (V45.9)", data=buf, file_name="TMS_Upload_Template_V45.9.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", type="secondary", use_container_width=True, key="v45_9_template")
-            up_file = st.file_uploader("📤 上傳Excel批量建立 (支援.xlsx)", type=["xlsx"], key="v45_9_excel_uploader")
+            st.download_button("📥 下載舊Excel模板 Template (V45.9)", data=buf, file_name="TMS_Upload_Template_V45.9.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", type="secondary", use_container_width=True, key="v45_9_template")
+            st.info("新公司訂單模板：上傳你嗰份 公司订单导出模板.xlsx，系統會自動將 要貨單號=InternalNo=貨單號，商品編碼+商品名稱+要货数量+要貨單位 自動拼入 CargoDetail*")
+            up_file = st.file_uploader("📤 上傳Excel批量建立 (支援舊模板 + 新公司订单导出模板)", type=["xlsx"], key="v45_9_excel_uploader")
             if up_file:
                 try:
-                    df_up = pd.read_excel(up_file, dtype=str).fillna(""); st.write(f"讀到 {len(df_up)} 行"); st.dataframe(df_up.head(10), use_container_width=True)
+                    # 自動判斷係咪新公司模板
+                    xls = pd.ExcelFile(up_file)
+                    df_check = pd.read_excel(up_file, sheet_name=0, header=1, nrows=2)
+                    is_new_template = "要貨單號" in df_check.columns or "商品編碼" in str(df_check.columns)
+                    up_file.seek(0)
+                    if is_new_template:
+                        df_up = parse_company_export_template(up_file)
+                        st.success(f"✅ 識別到新公司訂單模板，讀到 {len(df_up)} 行，已按 要貨單號=InternalNo，商品編碼/名稱/數量/單位→CargoDetail")
+                        st.dataframe(df_up[["要貨單號","商品編碼","商品名稱","要货数量","要貨單位","CargoDetail","InternalNo"]].head(20), use_container_width=True)
+                    else:
+                        df_up = pd.read_excel(up_file, dtype=str).fillna("")
+                        st.write(f"讀到 {len(df_up)} 行 (舊模板)"); st.dataframe(df_up.head(10), use_container_width=True)
                     if st.button(f"✅ 確認批量建立 {len(df_up)} 單 (只發1條去Group)", type="primary", use_container_width=True, key="v45_9_excel_confirm"):
                         created = 0
                         for _, r in df_up.iterrows():
-                            if str(r.get("Client","")).strip()=="" and str(r.get("From","")).strip()=="": continue
-                            jid=f"JOB-{now_hk().strftime('%m%d%H%M')}-{str(uuid.uuid4())[:4].upper()}"
-                            data={"InternalNo":str(r.get("InternalNo","")), "JobID":jid, "Date":str(r.get("Date","") or today_hk()), "Client":str(r.get("Client","")), "Zone":str(r.get("Zone","")), "From":str(r.get("From","")), "From_Contact":str(r.get("From_Contact","")), "From_Phone":str(r.get("From_Phone","")), "PickupTime":str(r.get("PickupTime","")), "To":str(r.get("To","")), "To_Contact":str(r.get("To_Contact","")), "To_Phone":str(r.get("To_Phone","")), "DeliveryTime":str(r.get("DeliveryTime","")), "CargoDetail":str(r.get("CargoDetail","")), "Notes":str(r.get("Notes","")), "Status":"Pending", "Driver":"", "CreatedBy":operator, "CreatedAt_HKT":now_hk().strftime("%Y-%m-%d %H:%M:%S HKT")}
+                            # 新模板轉舊Jobs格式
+                            if is_new_template:
+                                # 商戶名稱->Client, 收貨地址->To, 送貨日期->Date, 整單備注->Notes
+                                client = str(r.get("商戶名稱","") or r.get("Client",""))
+                                to_addr = str(r.get("收貨地址","") or r.get("To",""))
+                                date_val = str(r.get("送貨日期","") or r.get("Date","") or today_hk())
+                                if client.strip()=="" and to_addr.strip()=="": continue
+                                jid=f"JOB-{now_hk().strftime('%m%d%H%M')}-{str(uuid.uuid4())[:4].upper()}"
+                                data={"InternalNo":str(r.get("InternalNo","") or r.get("要貨單號","")), "JobID":jid, "Date":date_val, "Client":client, "Zone":"", "From":str(r.get("發貨倉庫","")), "From_Contact":str(r.get("發貨人","")), "From_Phone":str(r.get("發貨聯絡電話","")), "PickupTime":"", "To":to_addr, "To_Contact":str(r.get("收貨人","")), "To_Phone":str(r.get("聯係電話","")), "DeliveryTime":"", "CargoDetail":str(r.get("CargoDetail","")), "Notes":str(r.get("整單備注","")), "Status":"Pending", "Driver":"", "CreatedBy":operator, "CreatedAt_HKT":now_hk().strftime("%Y-%m-%d %H:%M:%S HKT")}
+                            else:
+                                if str(r.get("Client","")).strip()=="" and str(r.get("From","")).strip()=="": continue
+                                jid=f"JOB-{now_hk().strftime('%m%d%H%M')}-{str(uuid.uuid4())[:4].upper()}"
+                                data={"InternalNo":str(r.get("InternalNo","")), "JobID":jid, "Date":str(r.get("Date","") or today_hk()), "Client":str(r.get("Client","")), "Zone":str(r.get("Zone","")), "From":str(r.get("From","")), "From_Contact":str(r.get("From_Contact","")), "From_Phone":str(r.get("From_Phone","")), "PickupTime":str(r.get("PickupTime","")), "To":str(r.get("To","")), "To_Contact":str(r.get("To_Contact","")), "To_Phone":str(r.get("To_Phone","")), "DeliveryTime":str(r.get("DeliveryTime","")), "CargoDetail":str(r.get("CargoDetail","")), "Notes":str(r.get("Notes","")), "Status":"Pending", "Driver":"", "CreatedBy":operator, "CreatedAt_HKT":now_hk().strftime("%Y-%m-%d %H:%M:%S HKT")}
                             append_row_by_header("Jobs", data); created+=1
                         sync_order_costs_sheet(); msg = f"[V45.9]Excel批量上傳 {created}單 by {operator} - {now_hk().strftime('%m/%d %H:%M')}"; ok,info=send_whatsapp_to_ops(msg)
                         st.success(f"🎉 批量建立 {created} 單成功！WhatsApp Group:{info}"); st.code(msg); st.cache_data.clear()
