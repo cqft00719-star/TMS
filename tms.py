@@ -27,77 +27,93 @@ def send_ultramsg_message(to, body):
     except Exception as e:
         return False, str(e)
 
-# === 修復：發Excel附件 - 改用Base64，跟WMS最終版一樣 ===
 def send_ultramsg_document(to, file_path, caption=""):
     try:
         with open(file_path, "rb") as f:
             b64 = base64.b64encode(f.read()).decode("utf-8")
-        
         url = f"https://api.ultramsg.com/{ULTRAMSG_INSTANCE}/messages/document"
-        payload = {
-            "token": ULTRAMSG_TOKEN,
-            "to": to,
-            "document": b64,
-            "filename": os.path.basename(file_path),
-            "caption": caption
-        }
+        payload = {"token": ULTRAMSG_TOKEN, "to": to, "document": b64, "filename": os.path.basename(file_path), "caption": caption}
         r = requests.post(url, data=payload, timeout=60)
-        # Debug顯示，同WMS一樣
         try:
             st.sidebar.code(f"Base64 Len: {len(b64)}\nUltraMsg: {r.status_code}\n{r.text[:1000]}")
-        except:
-            pass
+        except: pass
         return r.status_code == 200, r.text[:1000]
     except Exception as e:
         import traceback
-        try:
-            st.sidebar.code(traceback.format_exc()[:1500])
-        except:
-            pass
         return False, str(e)
 
 def send_whatsapp_to_ops(message):
     try:
         if ULTRAMSG_GROUP_ID and "@g.us" in ULTRAMSG_GROUP_ID:
             ok, info = send_ultramsg_message(ULTRAMSG_GROUP_ID, message)
-            if ok:
-                return True, f"Ultramsg Group已發 {ULTRAMSG_GROUP_ID}"
-            else:
-                return False, f"Ultramsg失敗: {info}"
-        wa_cfg = st.secrets.get("ultramsg", {})
-        for p in wa_cfg.get("phones", []):
-            if "@g.us" in str(p):
-                ok, info = send_ultramsg_message(p, message)
-                if ok: return True, f"Ultramsg Group已發 {p}"
-        for ph in ["85260202131","85264328390"]:
-            ok, _ = send_ultramsg_message(ph, message)
-            if ok: return True, f"Ultramsg個人已發 {ph}"
+            if ok: return True, f"Ultramsg Group已發 {ULTRAMSG_GROUP_ID}"
+            else: return False, f"Ultramsg失敗: {info}"
     except Exception as e:
         return False, f"Ultramsg異常: {e}"
     return False, "Ultramsg發送失敗"
 
-# === 新增：新公司訂單Template解析 ===
+# === 修復：按要貨單號合併，6單唔係36單 ===
 def parse_company_export_template(file):
-    df = pd.read_excel(file, sheet_name=0, header=1, dtype=str).fillna("")
+    # 你份真Excel header係第1行，唔係第2行
+    df = pd.read_excel(file, sheet_name=0, header=0, dtype=str).fillna("")
     df.columns = [str(c).strip() for c in df.columns]
+    # 過濾合計行
     if "要貨單號" in df.columns:
-        df = df[~df["要貨單號"].astype(str).str.contains("合計|總計|", na=False)]
+        df = df[~df["要貨單號"].astype(str).str.contains("合計|總計", na=False)]
         df = df[df["要貨單號"].astype(str).str.strip()!=""]
-    def make_cargo(row):
-        code = str(row.get("商品編碼","")).strip()
-        name = str(row.get("商品名稱","")).strip()
-        qty = str(row.get("要货数量","")).strip()
-        uom = str(row.get("要貨單位","")).strip()
-        if code or name:
-            return f"{code} {name} x{qty}{uom}".strip()
-        return ""
-    if "商品編碼" in df.columns:
-        df["CargoDetail"] = df.apply(make_cargo, axis=1)
-        df["InternalNo"] = df["要貨單號"].astype(str)
-        df["貨單號"] = df["要貨單號"].astype(str)
-    return df
+    
+    # 按要貨單號合併
+    grouped = []
+    if "要貨單號" not in df.columns:
+        return df
+    
+    for order_no, group in df.groupby("要貨單號", sort=False):
+        first = group.iloc[0].to_dict()
+        # 合併所有商品：商品編碼 + 商品名稱 + 要货数量 + 要貨單位 + 行備注
+        cargo_lines = []
+        for _, r in group.iterrows():
+            code = str(r.get("商品編碼","")).strip()
+            name = str(r.get("商品名稱","")).strip()
+            qty = str(r.get("要货数量","")).strip()
+            uom = str(r.get("要貨單位","")).strip()
+            # 你份Excel入面商品編碼已經係 "朱古力雜莓蝴蝶酥*130塊"
+            line = f"{code} {name} {qty}{uom}".strip()
+            # 清理多餘空格，如果code本身已經包含數量，就直接用code
+            if code and "塊" in code:
+                line = code
+                if name: line += f" {name}"
+            if line:
+                cargo_lines.append(line)
+        
+        cargo_detail = "\n".join(cargo_lines)
+        
+        # 建立合併後嘅一張Order
+        merged = {
+            "商戶類型": first.get("商戶類型",""),
+            "商戶名稱": first.get("商戶名稱",""),
+            "發貨倉庫": first.get("發貨倉庫",""),
+            "發貨人": first.get("發貨人",""),
+            "發貨聯絡電話": first.get("發貨聯絡電話",""),
+            "接貨時間": first.get("接貨時間",""),
+            "收貨地址": first.get("收貨地址",""),
+            "收貨人": first.get("收貨人",""),
+            "聯係電話": first.get("聯係電話",""),
+            "送貨日期": first.get("送貨日期",""),
+            "要貨單號": order_no,
+            "創建日期": first.get("創建日期",""),
+            "整單備注": first.get("整單備注",""),
+            "CargoDetail": cargo_detail,
+            "商品明細數": len(group),
+            "InternalNo": order_no,
+            "Client": str(first.get("商戶名稱","")).strip(),
+            "From": str(first.get("發貨倉庫","")).strip(),
+            "To": str(first.get("收貨地址","")).strip(),
+            "Date": str(first.get("送貨日期","")).split(" ")[0] if first.get("送貨日期") else str(today_hk()),
+        }
+        grouped.append(merged)
+    
+    return pd.DataFrame(grouped)
 
-# === 每日自動生成Excel附件 - 已修復用Base64 ===
 def generate_and_send_daily_excel():
     df_jobs = load_df("Jobs")
     if df_jobs.empty:
@@ -108,8 +124,7 @@ def generate_and_send_daily_excel():
         if c in df_jobs.columns:
             date_col = c
             break
-    if not date_col:
-        return False
+    if not date_col: return False
     df_jobs[date_col] = pd.to_datetime(df_jobs[date_col], errors="coerce")
     tomorrow = today_hk() + datetime.timedelta(days=1)
     day_after = tomorrow + datetime.timedelta(days=1)
@@ -120,7 +135,7 @@ def generate_and_send_daily_excel():
     out_path = f"/tmp/TMS_Orders_{tomorrow}_to_{day_after}.xlsx"
     export_cols = [c for c in ["InternalNo","JobID","Date","Client","Zone","From","To","CargoDetail","DeliveryTime","Notes"] if c in filtered.columns]
     filtered[export_cols].to_excel(out_path, index=False)
-    caption = f"📦 TMS每日提醒 {now_hk().strftime('%Y-%m-%d %H:%M HKT')}\n聽日 {tomorrow} 同後日 {day_after} 共有 {len(filtered)} 張單\n已按新Template (要貨單號=InternalNo, CargoDetail含 商品編碼/名稱/數量/單位) 整理，詳見附件"
+    caption = f"📦 TMS每日提醒 {now_hk().strftime('%Y-%m-%d %H:%M HKT')}\n聽日 {tomorrow} 同後日 {day_after} 共有 {len(filtered)} 張單"
     ok, info = send_ultramsg_document(ULTRAMSG_GROUP_ID, out_path, caption)
     return ok
 
@@ -234,7 +249,7 @@ if not st.session_state.user:
 
 ensure_sheets(); user=st.session_state.user; role=str(user.get("role","driver")).lower(); operator=user.get("username",""); op_name=user.get("name","")
 st.sidebar.title(f"👤 {op_name} ({role})")
-st.sidebar.write("🔥 當前版本: **V45.9.2 Ultramsg專用 InternalNo置頂**")
+st.sidebar.write("🔥 當前版本: **V45.9.3 按要貨單號合併6單 + Base64 Excel**")
 st.sidebar.write(f"📱 {ULTRAMSG_INSTANCE} -> {ULTRAMSG_GROUP_ID}")
 if st.sidebar.button("登出",key="v45_9_logout"): st.session_state.user=None; st.cache_data.clear(); st.rerun()
 if st.sidebar.button("🔄 同步OrderCosts",key="v45_9_clear"):
@@ -244,7 +259,6 @@ if st.sidebar.button("🔍 測試WhatsApp Group",key="v45_9_test_wa"):
     ok, info = send_whatsapp_to_ops(test_msg)
     if ok: st.sidebar.success(f"✅ {info}");
     else: st.sidebar.error(f"❌ {info}")
-    st.sidebar.code(test_msg)
 if st.sidebar.button("📋 列出我所有Group ID",key="v45_9_list_groups"):
     try:
         url = f"https://api.ultramsg.com/{ULTRAMSG_INSTANCE}/groups"
@@ -257,7 +271,7 @@ if st.sidebar.button("📋 列出我所有Group ID",key="v45_9_list_groups"):
 if st.sidebar.button("📦 測試每日Excel附件發送",key="v45_9_test_daily_excel"):
     with st.spinner("生成緊聽日+後日Excel..."):
         ok = generate_and_send_daily_excel()
-        if ok: st.sidebar.success("✅ Excel附件已發去Group - 已修復為真.xlsx")
+        if ok: st.sidebar.success("✅ Excel附件已發去Group")
         else: st.sidebar.warning("今日無單或發送失敗，已發文字通知")
 
 if role=="admin": tabs=st.tabs(["📊 Dashboard","📋 任務管理","📤 上傳Order","📸 上傳POD","💰 雜費","💵 每單費用","📥 下載POD"])
@@ -298,7 +312,7 @@ with tabs[0]:
 
 if role in ["admin","op"]:
     with tabs[1]:
-        st.subheader("📋 任務管理 + 打印 V45.9 (V37格式)")
+        st.subheader("📋 任務管理 + 打印 V45.9")
         if df_jobs.empty: st.info("無任務")
         else:
             for idx,row in df_jobs.sort_values(by="JobID",ascending=False).head(100).iterrows():
@@ -315,25 +329,24 @@ if role in ["admin","op"]:
                         st.components.v1.html(printable_order_html(row.to_dict()), height=750, scrolling=True)
                         if st.button("❌ 關閉打印", key=f"v45_9_close_{jid}_{idx}"): st.session_state[f"print_{jid}"] = False; st.rerun()
     with tabs[2]:
-        st.subheader("📤 上傳Order - V45.9 完整版 + 新公司訂單模板")
+        st.subheader("📤 上傳Order - V45.9.3 已修復合併")
         with st.expander("📊 Excel批量上傳 + Template下載 (V45.9 + 新公司模板)", expanded=True):
             template_df = pd.DataFrame([{"Client":"和利鋼鐵有限公司", "Zone":"九龍", "From":"SGL J倉", "From_Contact":"Henry", "From_Phone":"", "PickupTime":"900", "To":"大角咀通州街95-97號恒生中心4樓全層", "To_Contact":"Jojo Leung", "To_Phone":"6537 0983", "DeliveryTime":"0900-1700", "CargoDetail":"PKG005_V03 8件\nFPCQH...", "InternalNo":"3CORP9120940", "Date":str(today_hk()), "Notes":""}])
             buf = io.BytesIO()
             with pd.ExcelWriter(buf, engine='openpyxl') as writer: template_df.to_excel(writer, index=False, sheet_name="Orders")
             buf.seek(0)
             st.download_button("📥 下載舊Excel模板 Template (V45.9)", data=buf, file_name="TMS_Upload_Template_V45.9.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", type="secondary", use_container_width=True, key="v45_9_template")
-            st.info("新公司訂單模板：上傳你嗰份 公司订单导出模板.xlsx，系統會自動將 要貨單號=InternalNo=貨單號，商品編碼+商品名稱+要货数量+要貨單位 自動拼入 CargoDetail*")
+            st.info("✅ 已修復：上傳你嗰份 公司订单导出模板.xlsx，系統會自動按 要貨單號 合併，同一個單號嘅所有商品會拼成一個CargoDetail，36行明細→6張Order")
             up_file = st.file_uploader("📤 上傳Excel批量建立 (支援舊模板 + 新公司订单导出模板)", type=["xlsx"], key="v45_9_excel_uploader")
             if up_file:
                 try:
-                    xls = pd.ExcelFile(up_file)
-                    df_check = pd.read_excel(up_file, sheet_name=0, header=1, nrows=2)
-                    is_new_template = "要貨單號" in df_check.columns or "商品編碼" in str(df_check.columns)
+                    df_check = pd.read_excel(up_file, sheet_name=0, header=0, nrows=2)
+                    is_new_template = "要貨單號" in df_check.columns or "商戶名稱" in df_check.columns
                     up_file.seek(0)
                     if is_new_template:
                         df_up = parse_company_export_template(up_file)
-                        st.success(f"✅ 識別到新公司訂單模板，讀到 {len(df_up)} 行，已按 要貨單號=InternalNo，商品編碼/名稱/數量/單位→CargoDetail")
-                        st.dataframe(df_up[["要貨單號","商品編碼","商品名稱","要货数量","要貨單位","CargoDetail","InternalNo"]].head(20), use_container_width=True)
+                        st.success(f"✅ 識別到新公司訂單模板，原始 {len(df_check)} 行明細，已按 要貨單號 合併為 {len(df_up)} 張Order")
+                        st.dataframe(df_up[["要貨單號","商戶名稱","商品明細數","CargoDetail","InternalNo"]].head(20), use_container_width=True)
                     else:
                         df_up = pd.read_excel(up_file, dtype=str).fillna("")
                         st.write(f"讀到 {len(df_up)} 行 (舊模板)"); st.dataframe(df_up.head(10), use_container_width=True)
@@ -346,15 +359,15 @@ if role in ["admin","op"]:
                                 date_val = str(r.get("送貨日期","") or r.get("Date","") or today_hk())
                                 if client.strip()=="" and to_addr.strip()=="": continue
                                 jid=f"JOB-{now_hk().strftime('%m%d%H%M')}-{str(uuid.uuid4())[:4].upper()}"
-                                data={"InternalNo":str(r.get("InternalNo","") or r.get("要貨單號","")), "JobID":jid, "Date":date_val, "Client":client, "Zone":"", "From":str(r.get("發貨倉庫","")), "From_Contact":str(r.get("發貨人","")), "From_Phone":str(r.get("發貨聯絡電話","")), "PickupTime":"", "To":to_addr, "To_Contact":str(r.get("收貨人","")), "To_Phone":str(r.get("聯係電話","")), "DeliveryTime":"", "CargoDetail":str(r.get("CargoDetail","")), "Notes":str(r.get("整單備注","")), "Status":"Pending", "Driver":"", "CreatedBy":operator, "CreatedAt_HKT":now_hk().strftime("%Y-%m-%d %H:%M:%S HKT")}
+                                data={"InternalNo":str(r.get("InternalNo","") or r.get("要貨單號","")), "JobID":jid, "Date":date_val, "Client":client, "Zone":"", "From":str(r.get("發貨倉庫","")), "From_Contact":str(r.get("發貨人","")), "From_Phone":str(r.get("發貨聯絡電話","")), "PickupTime":str(r.get("接貨時間","")), "To":to_addr, "To_Contact":str(r.get("收貨人","")), "To_Phone":str(r.get("聯係電話","")), "DeliveryTime":"", "CargoDetail":str(r.get("CargoDetail","")), "Notes":str(r.get("整單備注","")), "Status":"Pending", "Driver":"", "CreatedBy":operator, "CreatedAt_HKT":now_hk().strftime("%Y-%m-%d %H:%M:%S HKT")}
                             else:
                                 if str(r.get("Client","")).strip()=="" and str(r.get("From","")).strip()=="": continue
                                 jid=f"JOB-{now_hk().strftime('%m%d%H%M')}-{str(uuid.uuid4())[:4].upper()}"
                                 data={"InternalNo":str(r.get("InternalNo","")), "JobID":jid, "Date":str(r.get("Date","") or today_hk()), "Client":str(r.get("Client","")), "Zone":str(r.get("Zone","")), "From":str(r.get("From","")), "From_Contact":str(r.get("From_Contact","")), "From_Phone":str(r.get("From_Phone","")), "PickupTime":str(r.get("PickupTime","")), "To":str(r.get("To","")), "To_Contact":str(r.get("To_Contact","")), "To_Phone":str(r.get("To_Phone","")), "DeliveryTime":str(r.get("DeliveryTime","")), "CargoDetail":str(r.get("CargoDetail","")), "Notes":str(r.get("Notes","")), "Status":"Pending", "Driver":"", "CreatedBy":operator, "CreatedAt_HKT":now_hk().strftime("%Y-%m-%d %H:%M:%S HKT")}
                             append_row_by_header("Jobs", data); created+=1
-                        sync_order_costs_sheet(); msg = f"[V45.9]Excel批量上傳 {created}單 by {operator} - {now_hk().strftime('%m/%d %H:%M')}"; ok,info=send_whatsapp_to_ops(msg)
+                        sync_order_costs_sheet(); msg = f"[V45.9]Excel批量上傳 {created}單 by {operator} - {now_hk().strftime('%m/%d %H:%M')} (已按要貨單號合併)"; ok,info=send_whatsapp_to_ops(msg)
                         st.success(f"🎉 批量建立 {created} 單成功！WhatsApp Group:{info}"); st.code(msg); st.cache_data.clear()
-                except Exception as e: st.error(f"Excel讀取失敗: {e}")
+                except Exception as e: st.error(f"Excel讀取失敗: {e}"); import traceback; st.code(traceback.format_exc()[:2000])
         st.divider()
         with st.form("v45_9_order_form_full"):
             st.markdown("#### 📅 訂單日期")
