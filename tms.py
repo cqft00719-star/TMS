@@ -18,7 +18,6 @@ ULTRAMSG_INSTANCE = "instance194419"
 ULTRAMSG_TOKEN = "ji5hd4t2li7vf3ys"
 ULTRAMSG_GROUP_ID = "120363413020795341@g.us"
 
-# 每日自動發送時間 HKT
 DAILY_AUTO_HOUR = 17
 DAILY_AUTO_MINUTE = 0
 
@@ -67,7 +66,6 @@ def parse_company_export_template(file):
         for _, r in group.iterrows():
             code = str(r.get("商品編碼","")).strip()
             if code:
-                # 你圖入面商品編碼已經係完整名稱例如 朱古力雜莓蝴蝶酥*130塊
                 cargo_lines.append(code)
         cargo_detail = "\n".join(cargo_lines)
         merged = {
@@ -121,13 +119,11 @@ def generate_and_send_daily_excel():
     ok, info = send_ultramsg_document(ULTRAMSG_GROUP_ID, out_path, caption)
     return ok, info
 
-# === 新增：Streamlit Cloud 定時器邏輯 ===
 def get_last_daily_log():
     try:
         df = load_df("DailyLog")
         if df.empty or "Date" not in df.columns:
             return None
-        # 最後一行
         last = df.sort_values(by="Date", ascending=False).iloc[0].to_dict()
         return last.get("Date","")
     except:
@@ -147,19 +143,15 @@ def write_daily_log(status):
         print(f"DailyLog write fail {e}")
 
 def check_and_auto_send_daily():
-    # 用 st.cache_data + session_state 防止同一次load重複發
     if "daily_auto_checked" in st.session_state and st.session_state.daily_auto_checked:
         return
     now = now_hk()
-    # 17:00後先觸發
     if now.hour < DAILY_AUTO_HOUR or (now.hour == DAILY_AUTO_HOUR and now.minute < DAILY_AUTO_MINUTE):
         return
     last_date = get_last_daily_log()
     if last_date == str(today_hk()):
-        # 今日已發過
         st.session_state.daily_auto_checked = True
         return
-    # 執行發送
     ok, info = generate_and_send_daily_excel()
     if ok:
         write_daily_log(f"OK {info[:100]}")
@@ -181,7 +173,9 @@ def watermark_pod_image(b64_data_url, job_id, internal_no=""):
         draw.text((10, h-bar_h+50), now_hk().strftime("%Y/%m/%d %H:%M HKT"), fill=(200,200,200), font=font_large)
         buf = io.BytesIO(); img.save(buf, format="JPEG", quality=85)
         return buf.getvalue(), img
-    except: return None, None
+    except Exception as e:
+        print(f"watermark fail {e}")
+        return None, None
 
 @st.cache_resource
 def get_client():
@@ -277,14 +271,13 @@ if not st.session_state.user:
     st.stop()
 
 ensure_sheets()
-# === 自動每日任務：搬入Streamlit Cloud ===
 if "daily_auto_checked" not in st.session_state:
     st.session_state.daily_auto_checked = False
 check_and_auto_send_daily()
 
 user=st.session_state.user; role=str(user.get("role","driver")).lower(); operator=user.get("username",""); op_name=user.get("name","")
 st.sidebar.title(f"👤 {op_name} ({role})")
-st.sidebar.write(f"🔥 當前版本: **V45.9.4 AutoDaily 17:00 HKT**")
+st.sidebar.write(f"🔥 當前版本: **V45.9.5 POD下載修復+AutoDaily**")
 st.sidebar.write(f"📱 {ULTRAMSG_INSTANCE} -> {ULTRAMSG_GROUP_ID}")
 last_log = get_last_daily_log()
 if last_log:
@@ -375,7 +368,7 @@ if role in ["admin","op"]:
                         st.components.v1.html(printable_order_html(row.to_dict()), height=750, scrolling=True)
                         if st.button("❌ 關閉打印", key=f"v45_9_close_{jid}_{idx}"): st.session_state[f"print_{jid}"] = False; st.rerun()
     with tabs[2]:
-        st.subheader("📤 上傳Order - V45.9.4 已修復合併+AutoDaily")
+        st.subheader("📤 上傳Order - V45.9.5 已修復合併+AutoDaily")
         with st.expander("📊 Excel批量上傳", expanded=True):
             up_file = st.file_uploader("📤 上傳Excel批量建立 (支援舊模板 + 新公司订单导出模板)", type=["xlsx"], key="v45_9_excel_uploader")
             if up_file:
@@ -495,11 +488,54 @@ if cost_idx is not None:
         df_cost=load_df("OrderCosts")
         if not df_cost.empty:
             st.dataframe(df_cost.sort_values(by="JobID",ascending=False).head(200), use_container_width=True)
+    # === 修復：完整下載POD水印版 ===
     with tabs[6]:
-        st.subheader("📥 下載POD - 水印版")
+        st.subheader("📥 下載POD - 水印版 V45.9.5")
         col_d1, col_d2 = st.columns(2)
         with col_d1: date_from = st.date_input("由日期", value=today_hk() - datetime.timedelta(days=7), key="v45_9_d_from")
         with col_d2: date_to = st.date_input("到日期", value=today_hk(), key="v45_9_d_to")
-        df_pods = load_df("PODs")
-        if not df_pods.empty:
-            st.dataframe(df_pods.head(20), use_container_width=True)
+        df_pods = load_df("PODs"); df_jobs_all = load_df("Jobs")
+        if df_pods.empty:
+            st.warning("暫無POD記錄")
+        else:
+            job_internal_map = {}
+            if not df_jobs_all.empty and "JobID" in df_jobs_all.columns:
+                for _, r in df_jobs_all.iterrows(): job_internal_map[str(r.get("JobID",""))] = str(r.get("InternalNo",""))
+            def parse_pod_date(s):
+                try: return datetime.datetime.strptime(str(s).split(" ")[0], "%Y-%m-%d").date()
+                except: return None
+            df_pods["ParsedDate"] = df_pods["CreatedAt_HKT"].apply(parse_pod_date)
+            filtered = df_pods[(df_pods["ParsedDate"] >= date_from) & (df_pods["ParsedDate"] <= date_to)]
+            st.success(f"🔍 找到 {len(filtered)} 張POD ({date_from} 至 {date_to})")
+            if not filtered.empty:
+                show_df = filtered[["POD_ID","JobID","FileName","CreatedAt_HKT"]].copy()
+                show_df["InternalNo"] = show_df["JobID"].map(job_internal_map)
+                show_df = show_df[["InternalNo","POD_ID","JobID","FileName","CreatedAt_HKT"]]
+                st.dataframe(show_df.sort_values(by="CreatedAt_HKT", ascending=False), use_container_width=True, height=250)
+                st.divider()
+                st.markdown("#### 🖼️ 預覽 (已加水印) - 頭9張")
+                preview_cols = st.columns(3)
+                zip_buffer = io.BytesIO()
+                watermarked_files = []
+                with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+                    for idx, (_, row) in enumerate(filtered.sort_values(by="JobID").iterrows()):
+                        jid = str(row.get("JobID","")); internal = job_internal_map.get(jid, "")
+                        b64_img = row.get("Base64_Image","")
+                        img_bytes, pil_img = watermark_pod_image(b64_img, jid, internal)
+                        if img_bytes:
+                            fname = f"{jid}_{internal}_{row.get('POD_ID','')}.jpg".replace("/","-")
+                            zf.writestr(fname, img_bytes)
+                            watermarked_files.append((fname, pil_img))
+                for i, (fname, pil_img) in enumerate(watermarked_files[:9]):
+                    with preview_cols[i % 3]:
+                        st.image(pil_img, caption=fname[:30], use_column_width=True)
+                zip_buffer.seek(0)
+                st.download_button(
+                    label=f"📦 下載全部 {len(watermarked_files)} 張 (已加水印Zip)",
+                    data=zip_buffer,
+                    file_name=f"PODs_{date_from}_to_{date_to}_V45.9.5.zip",
+                    mime="application/zip",
+                    type="primary",
+                    use_container_width=True,
+                    key="v45_9_download_zip"
+                )
