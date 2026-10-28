@@ -11,7 +11,6 @@ HKT = timezone(timedelta(hours=8))
 def now_hk(): return datetime.datetime.now(HKT)
 def today_hk(): return now_hk().date()
 
-# 自動刷新，每60秒檢查一次是否到17:00要發
 try:
     from streamlit_autorefresh import st_autorefresh
     st_autorefresh(interval=60*1000, key="tms_autorefresh_60s")
@@ -137,14 +136,12 @@ def check_and_auto_send_daily():
     ok, info = generate_and_send_daily_excel()
     write_daily_log(f"{'OK' if ok else 'FAIL'} {info[:120]}")
 
-# === 修復1：POD轉Delivered 穩定版 ===
 def set_job_delivered(jid):
     try:
         ws = get_sh().worksheet("Jobs")
         headers = [h.strip() for h in ws.row_values(1)]
         if "JobID" not in headers: return False
         jid_col = headers.index("JobID") + 1
-        # 有2個InternalNo，Status取最後一個
         status_idx = [i for i,h in enumerate(headers) if h=="Status"]
         if not status_idx: return False
         status_col = status_idx[-1] + 1
@@ -162,12 +159,10 @@ def set_job_delivered(jid):
         print(f"set_job_delivered fail {e}")
         return False
 
-# === 修復2：高清POD壓縮，自動適配48KB以內 ===
 def compress_pod_high_quality(uploaded_file):
     try:
         img = Image.open(io.BytesIO(uploaded_file.getvalue()))
         img = ImageOps.exif_transpose(img).convert("RGB")
-        # 從大到小嘗試，保證清晰度
         for max_side in [1600, 1400, 1200, 1024, 900]:
             for quality in [85, 75, 65, 55]:
                 buf = io.BytesIO()
@@ -175,9 +170,8 @@ def compress_pod_high_quality(uploaded_file):
                 tmp.thumbnail((max_side, max_side), Image.LANCZOS)
                 tmp.save(buf, format="JPEG", quality=quality, optimize=True)
                 fb = buf.getvalue()
-                if len(fb) <= 48000: # 留2KB給base64 overhead，50K limit
+                if len(fb) <= 48000:
                     return fb, max_side, quality
-        # 最後保底
         buf = io.BytesIO()
         img.thumbnail((800, 800), Image.LANCZOS)
         img.save(buf, format="JPEG", quality=50, optimize=True)
@@ -299,7 +293,6 @@ if not st.session_state.user:
     st.stop()
 
 ensure_sheets()
-# 自動任務，放喺ensure後，唔再用session_state擋
 try:
     check_and_auto_send_daily()
 except Exception as e:
@@ -307,7 +300,7 @@ except Exception as e:
 
 user=st.session_state.user; role=str(user.get("role","driver")).lower(); operator=user.get("username",""); op_name=user.get("name","")
 st.sidebar.title(f"👤 {op_name} ({role})")
-st.sidebar.write(f"🔥 當前版本: **V45.9.7 高清POD+Delivered修復**")
+st.sidebar.write(f"🔥 當前版本: **V45.9.8 高清POD+Delivered+OrderCosts下載**")
 st.sidebar.write(f"📱 {ULTRAMSG_INSTANCE} -> {ULTRAMSG_GROUP_ID}")
 last_log = get_last_daily_log()
 if last_log: st.sidebar.caption(f"上次自動發送: {last_log}")
@@ -455,7 +448,6 @@ with tabs[pod_idx]:
                     pod_id=f"POD-{now_hk().strftime('%m%d%H%M%S')}-{uuid.uuid4().hex[:4]}"
                     append_row("PODs",[pod_id,jid,f"{jid}_POD_{now_hk().strftime('%Y%m%d_%H%M%S')}_{idx_file+1}.jpg",str(len(fb)),data_url,operator,now_hk().strftime("%Y-%m-%d %H:%M:%S HKT"),now_hk().strftime("%Y-%m-%d %H:%M:%S HKT")])
                     count_ok+=1
-                # 核心修復：一定轉Delivered
                 ok_status = set_job_delivered(jid)
                 sync_order_costs_sheet()
                 msg = f"[V45.9.7 POD] JobID:{jid} 司機:{operator} 已上傳{count_ok}張高清POD ({max_side}px q{qual}) 已轉Delivered:{ok_status}"
@@ -508,12 +500,54 @@ if role=="driver":
 cost_idx = 5 if role in ["admin","op"] else None
 if cost_idx is not None:
     with tabs[cost_idx]:
-        st.subheader("💵 每單費用 OrderCosts")
-        if st.button("🔄 立即重新同步", key="v45_9_sync_cost_btn", type="primary", use_container_width=True):
-            cnt=sync_order_costs_sheet(); st.success(f"已同步 {cnt} 單")
+        st.subheader("💵 每單費用 OrderCosts V45.9.8")
+        c_sync, c_dl1, c_dl2 = st.columns([1,1,1])
+        with c_sync:
+            if st.button("🔄 立即重新同步", key="v45_9_sync_cost_btn", type="primary", use_container_width=True):
+                cnt=sync_order_costs_sheet(); st.success(f"已同步 {cnt} 單"); st.rerun()
+        
         df_cost=load_df("OrderCosts")
-        if not df_cost.empty:
-            st.dataframe(df_cost.sort_values(by="JobID",ascending=False).head(200), use_container_width=True)
+        if df_cost.empty:
+            st.warning("暫無OrderCosts，請先按同步")
+        else:
+            df_cost["Date_parsed"] = pd.to_datetime(df_cost["Date"], errors="coerce")
+            col_f1, col_f2 = st.columns(2)
+            with col_f1:
+                d_from = st.date_input("由日期", value=today_hk()-datetime.timedelta(days=30), key="oc_from")
+            with col_f2:
+                d_to = st.date_input("到日期", value=today_hk(), key="oc_to")
+            filtered_cost = df_cost[(df_cost["Date_parsed"].dt.date >= d_from) & (df_cost["Date_parsed"].dt.date <= d_to)] if not df_cost["Date_parsed"].isna().all() else df_cost
+            st.success(f"🔍 找到 {len(filtered_cost)} 單 (總 {len(df_cost)} 單) {d_from} 至 {d_to}")
+            st.dataframe(filtered_cost.sort_values(by="JobID",ascending=False), use_container_width=True, height=450)
+
+            buf_excel = io.BytesIO()
+            with pd.ExcelWriter(buf_excel, engine='openpyxl') as writer:
+                export_df = filtered_cost.drop(columns=["Date_parsed"], errors="ignore")
+                export_df.to_excel(writer, index=False, sheet_name="OrderCosts")
+            buf_excel.seek(0)
+            
+            buf_csv = io.StringIO()
+            export_df.to_csv(buf_csv, index=False, encoding='utf-8-sig')
+            
+            with c_dl1:
+                st.download_button(
+                    label=f"📥 下載Excel ({len(filtered_cost)}單)",
+                    data=buf_excel,
+                    file_name=f"OrderCosts_{d_from}_to_{d_to}_V45.9.8.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    type="primary",
+                    use_container_width=True,
+                    key="oc_dl_excel"
+                )
+            with c_dl2:
+                st.download_button(
+                    label=f"📥 下載CSV ({len(filtered_cost)}單)",
+                    data=buf_csv.getvalue(),
+                    file_name=f"OrderCosts_{d_from}_to_{d_to}_V45.9.8.csv",
+                    mime="text/csv",
+                    use_container_width=True,
+                    key="oc_dl_csv"
+                )
     with tabs[6]:
         st.subheader("📥 下載POD - 水印版 V45.9.7 高清")
         col_d1, col_d2 = st.columns(2)
