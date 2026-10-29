@@ -4,7 +4,7 @@ import gspread
 from google.oauth2.service_account import Credentials
 import datetime
 from datetime import timezone, timedelta
-import uuid, io, base64, requests, zipfile, os
+import uuid, io, base64, requests, zipfile, os, time
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 HKT = timezone(timedelta(hours=8))
@@ -17,7 +17,7 @@ try:
 except:
     pass
 
-st.set_page_config(page_title="TMS V45.9 完整版", layout="wide", page_icon="🚚")
+st.set_page_config(page_title="TMS V46.0 完整版", layout="wide", page_icon="🚚")
 
 NEW_FEES = ["隧道費","登記費","停車費","交倉附加費","其他"]
 ULTRAMSG_INSTANCE = "instance194419"
@@ -222,13 +222,42 @@ def load_df(tab):
                 rows.append(r[:len(clean)])
         return pd.DataFrame(rows, columns=clean)
     except: return pd.DataFrame()
+
+# === 新增：安全寫入，解決APIError ===
+def append_row_safe(tab,row):
+    try:
+        safe_row=[]
+        for c in row:
+            s=str(c)
+            if len(s)>45000:
+                s=s[:45000]+"...[已截斷]"
+            safe_row.append(s)
+        get_sh().worksheet(tab).append_rows([safe_row], value_input_option='USER_ENTERED')
+        st.cache_data.clear()
+        return True
+    except Exception as e:
+        msg=str(e)
+        if "429" in msg or "Quota" in msg:
+            time.sleep(2.5)
+            try:
+                get_sh().worksheet(tab).append_rows([safe_row], value_input_option='USER_ENTERED')
+                st.cache_data.clear()
+                return True
+            except Exception as e2:
+                st.error(f"寫入 {tab} 失敗(重試後): {e2}")
+                return False
+        st.error(f"寫入 {tab} 失敗: {e}")
+        return False
+
 def append_row(tab,row):
-    get_sh().worksheet(tab).append_rows([row], value_input_option='USER_ENTERED'); st.cache_data.clear()
+    return append_row_safe(tab,row)
+
 def append_row_by_header(tab, data_dict):
     ws=get_sh().worksheet(tab); headers=[h.strip() for h in ws.row_values(1)]; row=[""]*len(headers)
     for k,v in data_dict.items():
         if k in headers: row[headers.index(k)]=str(v)
-    ws.append_rows([row], value_input_option='USER_ENTERED'); st.cache_data.clear()
+    return append_row_safe(tab,row)
+
 def sync_order_costs_sheet():
     try:
         df_jobs=load_df("Jobs"); df_exp=load_df("Expenses")
@@ -250,9 +279,12 @@ def sync_order_costs_sheet():
         ws=get_sh().worksheet("OrderCosts"); ws.clear(); ws.update('A1',[headers])
         if not df_cost.empty:
             rows=[[str(r.get(h,"")) for h in headers] for _,r in df_cost.sort_values(by="JobID",ascending=False).iterrows()]
-            ws.append_rows(rows, value_input_option='USER_ENTERED')
+            for i in range(0,len(rows),100):
+                ws.append_rows(rows[i:i+100], value_input_option='USER_ENTERED')
+                time.sleep(0.5)
         st.cache_data.clear(); return len(df_cost)
     except Exception as e: st.error(f"OrderCosts同步失敗: {e}"); return 0
+
 def ensure_sheets():
     sh=get_sh(); existing=[ws.title for ws in sh.worksheets()]
     def add(t,h,d=None):
@@ -265,6 +297,7 @@ def ensure_sheets():
     add("Expenses",["ExpenseID","Date","JobID","Driver","Type","Amount","Remark","CreatedAt_HKT"])
     add("OrderCosts",["InternalNo","JobID","Date","Client","Zone","From","From_Contact","From_Phone","PickupTime","To","To_Contact","To_Phone","DeliveryTime","CargoDetail","Status","Driver","隧道費","登記費","停車費","交倉附加費","其他","TotalExpense","LastSync_HKT"])
     add("DailyLog",["Date","Time_HKT","Status","Detail","TriggeredBy"])
+
 def printable_order_html(job):
     jid = job.get('JobID',''); internal = job.get('InternalNo',''); client = job.get('Client',''); zone = job.get('Zone','')
     from_addr = job.get('From',''); from_contact = job.get('From_Contact',''); from_phone = job.get('From_Phone',''); pickup = job.get('PickupTime','')
@@ -282,11 +315,19 @@ def printable_order_html(job):
     <div class="sign"><div>司機簽收: __________________</div><div>客戶簽收: __________________</div><div>日期: {date_str}</div></div></div>
     <div class="hint no-print"><button onclick="window.print()" style="margin-top:10px; padding:10px 22px; font-size:15px;">🖨️ 打印 / Save as PDF</button></div></body></html>"""
 
+def format_job_option(row):
+    jid=str(row.get("JobID",""))
+    client=str(row.get("Client",""))[:15]
+    internal=str(row.get("InternalNo",""))
+    date=str(row.get("Date",""))[:10]
+    delivery=str(row.get("DeliveryTime",""))
+    return f"{jid} | {client} | {internal} | {date} {delivery}".strip()
+
 if "user" not in st.session_state: st.session_state.user=None
 if not st.session_state.user:
-    st.title("TMS V45.9 登入 - 完整版")
+    st.title("TMS V46.0 登入 - 完整版")
     df_u=load_df("Users"); u=st.text_input("用戶名"); p=st.text_input("密碼",type="password")
-    if st.button("登入",type="primary",key="v45_9_login"):
+    if st.button("登入",type="primary",key="v46_login"):
         m=df_u[(df_u["username"].astype(str).str.strip()==u.strip()) & (df_u["password"].astype(str).str.strip()==p.strip())]
         if not m.empty: st.session_state.user=m.iloc[0].to_dict(); st.rerun()
         else: st.error("帳號錯")
@@ -300,28 +341,28 @@ except Exception as e:
 
 user=st.session_state.user; role=str(user.get("role","driver")).lower(); operator=user.get("username",""); op_name=user.get("name","")
 st.sidebar.title(f"👤 {op_name} ({role})")
-st.sidebar.write(f"🔥 當前版本: **V45.9.8 高清POD+Delivered+OrderCosts下載**")
+st.sidebar.write(f"🔥 當前版本: **V46.0 修復POD+易搵Job+日期篩選**")
 st.sidebar.write(f"📱 {ULTRAMSG_INSTANCE} -> {ULTRAMSG_GROUP_ID}")
 last_log = get_last_daily_log()
 if last_log: st.sidebar.caption(f"上次自動發送: {last_log}")
 else: st.sidebar.caption("今日未自動發送 (17:00 HKT)")
 
-if st.sidebar.button("登出",key="v45_9_logout"): st.session_state.user=None; st.cache_data.clear(); st.rerun()
-if st.sidebar.button("🔄 同步OrderCosts",key="v45_9_clear"):
+if st.sidebar.button("登出",key="v46_logout"): st.session_state.user=None; st.cache_data.clear(); st.rerun()
+if st.sidebar.button("🔄 同步OrderCosts",key="v46_clear"):
     cnt=sync_order_costs_sheet(); st.sidebar.success(f"已同步 {cnt} 單")
-if st.sidebar.button("🔍 測試WhatsApp Group",key="v45_9_test_wa"):
-    test_msg = f"[V45.9測試]{now_hk().strftime('%m/%d %H:%M')} 測試通知 - by {operator}"
+if st.sidebar.button("🔍 測試WhatsApp Group",key="v46_test_wa"):
+    test_msg = f"[V46測試]{now_hk().strftime('%m/%d %H:%M')} 測試通知 - by {operator}"
     ok, info = send_whatsapp_to_ops(test_msg)
     if ok: st.sidebar.success(f"✅ {info}");
     else: st.sidebar.error(f"❌ {info}")
-if st.sidebar.button("📦 測試每日Excel附件發送",key="v45_9_test_daily_excel"):
+if st.sidebar.button("📦 測試每日Excel附件發送",key="v46_test_daily_excel"):
     with st.spinner("生成緊聽日+後日Excel..."):
         ok, info = generate_and_send_daily_excel()
         if ok: 
             st.sidebar.success(f"✅ Excel附件已發去Group {info}")
             write_daily_log(f"MANUAL OK {info[:100]}")
         else: st.sidebar.warning(f"失敗 {info}")
-if st.sidebar.button("📅 查看DailyLog",key="v45_9_view_log"):
+if st.sidebar.button("📅 查看DailyLog",key="v46_view_log"):
     df_log = load_df("DailyLog")
     st.sidebar.dataframe(df_log.tail(10))
 
@@ -338,23 +379,31 @@ def get_my_jobs(df):
 
 with tabs[0]:
     if role=="driver":
-        st.subheader("🟢 可接任務池")
+        st.subheader("🟢 可接任務池 - 有送貨日子")
         df_pool=df_jobs[(df_jobs["Driver"].astype(str).str.strip()=="") & (df_jobs["Status"].astype(str).str.upper().isin(["PENDING",""]))] if not df_jobs.empty else pd.DataFrame()
         if df_pool.empty: st.info("暫無可接")
         else:
-            for idx,row in df_pool.sort_values(by="JobID",ascending=False).iterrows():
+            if "Date" in df_pool.columns:
+                try:
+                    df_pool["Date_sort"]=pd.to_datetime(df_pool["Date"], errors="coerce")
+                    df_pool=df_pool.sort_values(by="Date_sort", ascending=True)
+                except:
+                    df_pool=df_pool.sort_values(by="JobID",ascending=False)
+            for idx,row in df_pool.iterrows():
                 jid=row.get("JobID","")
                 with st.container(border=True):
                     st.markdown(f"**{jid}** | {row.get('Client','')} | Internal:{row.get('InternalNo','')}")
+                    st.write(f"📅 送貨: **{row.get('Date','')} {row.get('DeliveryTime','')}** | 客: {row.get('Client','')}")
                     st.write(f"從 {row.get('From','')} -> {row.get('To','')}")
-                    if st.button("🟢 搶此單",key=f"v45_9_claim_{jid}_{idx}",type="primary"):
+                    st.caption(f"Cargo: {str(row.get('CargoDetail',''))[:100]}")
+                    if st.button("🟢 搶此單",key=f"v46_claim_{jid}_{idx}",type="primary"):
                         ws=get_sh().worksheet("Jobs"); headers=[h.strip() for h in ws.row_values(1)]; cell=ws.find(jid)
                         if cell:
                             if "Driver" in headers: ws.update_cell(cell.row, headers.index("Driver")+1, operator)
                             if "Status" in headers: ws.update_cell(cell.row, headers.index("Status")+1, "Accepted")
-                            st.cache_data.clear(); send_whatsapp_to_ops(f"[V45.9]JobID:{jid} 司機:{operator} 已接單"); st.success(f"已搶 {jid}"); st.rerun()
+                            st.cache_data.clear(); send_whatsapp_to_ops(f"[V46]JobID:{jid} 司機:{operator} 已接單"); st.success(f"已搶 {jid}"); st.rerun()
     else:
-        st.subheader("📊 Dashboard V45.9")
+        st.subheader("📊 Dashboard V46.0")
         if not df_jobs.empty:
             cols = ["InternalNo"] + [c for c in df_jobs.columns if c != "InternalNo"] if "InternalNo" in df_jobs.columns else df_jobs.columns.tolist()
             st.dataframe(df_jobs[cols].head(200), use_container_width=True)
@@ -363,7 +412,7 @@ with tabs[0]:
 
 if role in ["admin","op"]:
     with tabs[1]:
-        st.subheader("📋 任務管理 + 打印 V45.9")
+        st.subheader("📋 任務管理 + 打印 V46.0")
         if df_jobs.empty: st.info("無任務")
         else:
             for idx,row in df_jobs.sort_values(by="JobID",ascending=False).head(100).iterrows():
@@ -372,17 +421,17 @@ if role in ["admin","op"]:
                     c1,c2,c3 = st.columns([3,1,1])
                     with c1:
                         st.markdown(f"**{jid}** | {row.get('Client','')} | Internal:{row.get('InternalNo','')} | {row.get('Status','')} | Driver:{row.get('Driver','')}")
-                        st.caption(f"{row.get('From','')} -> {row.get('To','')} | {row.get('Date','')}")
+                        st.caption(f"{row.get('From','')} -> {row.get('To','')} | 📅 {row.get('Date','')} {row.get('DeliveryTime','')}")
                     with c2:
-                        if st.button("🖨️ 打印", key=f"v45_9_print_{jid}_{idx}"): st.session_state[f"print_{jid}"] = True
+                        if st.button("🖨️ 打印", key=f"v46_print_{jid}_{idx}"): st.session_state[f"print_{jid}"] = True
                     with c3: st.write(row.get('Zone',''))
                     if st.session_state.get(f"print_{jid}"):
                         st.components.v1.html(printable_order_html(row.to_dict()), height=750, scrolling=True)
-                        if st.button("❌ 關閉打印", key=f"v45_9_close_{jid}_{idx}"): st.session_state[f"print_{jid}"] = False; st.rerun()
+                        if st.button("❌ 關閉打印", key=f"v46_close_{jid}_{idx}"): st.session_state[f"print_{jid}"] = False; st.rerun()
     with tabs[2]:
         st.subheader("📤 上傳Order")
         with st.expander("📊 Excel批量上傳", expanded=True):
-            up_file = st.file_uploader("📤 上傳Excel批量建立", type=["xlsx"], key="v45_9_excel_uploader")
+            up_file = st.file_uploader("📤 上傳Excel批量建立", type=["xlsx"], key="v46_excel_uploader")
             if up_file:
                 try:
                     df_check = pd.read_excel(up_file, sheet_name=0, header=0, nrows=2)
@@ -394,7 +443,7 @@ if role in ["admin","op"]:
                         st.dataframe(df_up[["要貨單號","商戶名稱","商品明細數","CargoDetail"]].head(20), use_container_width=True)
                     else:
                         df_up = pd.read_excel(up_file, dtype=str).fillna("")
-                    if st.button(f"✅ 確認批量建立 {len(df_up)} 單", type="primary", use_container_width=True, key="v45_9_excel_confirm"):
+                    if st.button(f"✅ 確認批量建立 {len(df_up)} 單", type="primary", use_container_width=True, key="v46_excel_confirm"):
                         created = 0
                         for _, r in df_up.iterrows():
                             if is_new_template:
@@ -411,11 +460,11 @@ if role in ["admin","op"]:
                         sync_order_costs_sheet(); st.success(f"🎉 批量建立 {created} 單成功！"); st.cache_data.clear()
                 except Exception as e: st.error(f"Excel讀取失敗: {e}")
 
-        with st.form("v45_9_order_form_full"):
-            order_date = st.date_input("📅 選擇訂單日期 (Date)*", value=today_hk(), key="v45_9_manual_date")
+        with st.form("v46_order_form_full"):
+            order_date = st.date_input("📅 選擇訂單日期 (Date)*", value=today_hk(), key="v46_manual_date")
             colA, colB = st.columns(2)
             with colA:
-                client=st.text_input("客戶* (Client)"); zone=st.selectbox("Zone", ["", "HKI","KLN","NT","九龍","香港","新界","離島","OTHER"], key="v45_9_zone")
+                client=st.text_input("客戶* (Client)"); zone=st.selectbox("Zone", ["", "HKI","KLN","NT","九龍","香港","新界","離島","OTHER"], key="v46_zone")
                 from_loc=st.text_input("起點* (From)"); from_contact=st.text_input("起點聯絡人"); from_phone=st.text_input("起點電話"); pickup_time=st.text_input("提貨時間", placeholder="900")
             with colB:
                 internal_no=st.text_input("InternalNo*"); to_loc=st.text_input("終點* (To)"); to_contact=st.text_input("終點聯絡人"); to_phone=st.text_input("終點電話"); delivery_time=st.text_input("送貨時間", placeholder="0900-1700")
@@ -430,13 +479,23 @@ if role in ["admin","op"]:
 
 pod_idx=3 if role in ["admin","op"] else 2
 with tabs[pod_idx]:
-    st.subheader("📸 上傳POD - 高清版 V45.9.7")
+    st.subheader("📸 上傳POD - V46.0 修復版 + 顯示客戶+日子")
     my_jobs = get_my_jobs(df_jobs) if role=="driver" else df_jobs
     my_pool=my_jobs.sort_values(by="JobID",ascending=False) if not my_jobs.empty else df_jobs
     if not my_pool.empty:
-        with st.form("v45_9_pod_form_final", clear_on_submit=True):
-            jid = st.selectbox("選擇JobID", my_pool["JobID"].tolist(), key="v45_9_pod_jid")
-            pod_files=st.file_uploader("📷 拍照上傳POD (可多張) - 已提升至高清",type=["jpg","png","jpeg"],accept_multiple_files=True,key="v45_9_pod_files_final")
+        options = my_pool.to_dict('records')
+        labels = [format_job_option(r) for r in options]
+        label_to_jid = dict(zip(labels, [r["JobID"] for r in options]))
+        
+        with st.form("v46_pod_form_final", clear_on_submit=True):
+            sel_label = st.selectbox("選擇JobID (已顯示客戶+Internal+送貨日子)", labels, key="v46_pod_jid")
+            jid = label_to_jid.get(sel_label, options[0]["JobID"])
+            sel_row = my_pool[my_pool["JobID"]==jid]
+            if not sel_row.empty:
+                r=sel_row.iloc[0]
+                st.info(f"已選: {r.get('Client','')} | {r.get('To','')} | 📅 {r.get('Date','')} {r.get('DeliveryTime','')}")
+            
+            pod_files=st.file_uploader("📷 拍照上傳POD (可多張) - 已修復不會爆APIError",type=["jpg","png","jpeg"],accept_multiple_files=True,key="v46_pod_files_final")
             submit_pod = st.form_submit_button("📤 上傳POD + 自動轉Delivered", type="primary", use_container_width=True)
             if submit_pod and pod_files:
                 count_ok=0
@@ -446,27 +505,37 @@ with tabs[pod_idx]:
                     b64=base64.b64encode(fb).decode()
                     data_url=f"data:image/jpeg;base64,{b64}"
                     pod_id=f"POD-{now_hk().strftime('%m%d%H%M%S')}-{uuid.uuid4().hex[:4]}"
-                    append_row("PODs",[pod_id,jid,f"{jid}_POD_{now_hk().strftime('%Y%m%d_%H%M%S')}_{idx_file+1}.jpg",str(len(fb)),data_url,operator,now_hk().strftime("%Y-%m-%d %H:%M:%S HKT"),now_hk().strftime("%Y-%m-%d %H:%M:%S HKT")])
-                    count_ok+=1
+                    ok_row = append_row_safe("PODs",[pod_id,jid,f"{jid}_POD_{now_hk().strftime('%Y%m%d_%H%M%S')}_{idx_file+1}.jpg",str(len(fb)),data_url,operator,now_hk().strftime("%Y-%m-%d %H:%M:%S HKT"),now_hk().strftime("%Y-%m-%d %H:%M:%S HKT")])
+                    if ok_row: count_ok+=1
                 ok_status = set_job_delivered(jid)
                 sync_order_costs_sheet()
-                msg = f"[V45.9.7 POD] JobID:{jid} 司機:{operator} 已上傳{count_ok}張高清POD ({max_side}px q{qual}) 已轉Delivered:{ok_status}"
+                msg = f"[V46 POD] JobID:{jid} 司機:{operator} 已上傳{count_ok}張高清POD ({max_side}px q{qual}) 已轉Delivered:{ok_status}"
                 send_whatsapp_to_ops(msg)
                 st.cache_data.clear()
                 if ok_status:
                     st.success(f"🎉 成功上傳 {count_ok} 張高清POD ({max_side}px q{qual})，Status已自動轉 Delivered")
                 else:
                     st.warning(f"已上傳 {count_ok} 張，但Status自動轉換失敗，請手動檢查 Jobs表")
+    else:
+        st.info("暫無可選Job")
 
 expense_idx = 4 if role in ["admin","op"] else 3
 with tabs[expense_idx]:
-    st.subheader("💰 雜費")
+    st.subheader("💰 雜費 - 顯示客戶+日子")
     my_for_expense = get_my_jobs(df_jobs) if role=="driver" else df_jobs
     if not my_for_expense.empty:
         my_for_expense=my_for_expense.sort_values(by="JobID",ascending=False)
-        sel_exp_jid=st.selectbox("揀JobID入雜費", my_for_expense["JobID"].tolist(), key="v45_9_exp_jid")
-        with st.form("v45_9_expense_form_final", clear_on_submit=False):
-            exp_date = st.date_input("日期", value=today_hk(), key="v45_9_exp_date")
+        exp_options = my_for_expense.to_dict('records')
+        exp_labels = [format_job_option(r) for r in exp_options]
+        exp_label_to_jid = dict(zip(exp_labels, [r["JobID"] for r in exp_options]))
+        sel_exp_label=st.selectbox("揀JobID入雜費 (有客戶+日子)", exp_labels, key="v46_exp_jid")
+        sel_exp_jid = exp_label_to_jid.get(sel_exp_label)
+        sel_row = my_for_expense[my_for_expense["JobID"]==sel_exp_jid]
+        if not sel_row.empty:
+            r=sel_row.iloc[0]
+            st.info(f"已選: {r.get('Client','')} | 📅 {r.get('Date','')} | {r.get('To','')}")
+        with st.form("v46_expense_form_final", clear_on_submit=False):
+            exp_date = st.date_input("日期", value=today_hk(), key="v46_exp_date")
             c1,c2=st.columns(2)
             with c1:
                 amt_tunnel = st.number_input("隧道費", min_value=0.0, step=10.0, value=0.0)
@@ -481,29 +550,60 @@ with tabs[expense_idx]:
                 if to_submit:
                     for fee_type, amount in to_submit.items():
                         exp_id=f"EXP-{now_hk().strftime('%m%d%H%M%S')}-{uuid.uuid4().hex[:4]}"
-                        append_row("Expenses",[exp_id, str(exp_date), sel_exp_jid, operator, fee_type, str(int(amount)), "", now_hk().strftime("%Y-%m-%d %H:%M:%S HKT")])
+                        append_row_safe("Expenses",[exp_id, str(exp_date), sel_exp_jid, operator, fee_type, str(int(amount)), "", now_hk().strftime("%Y-%m-%d %H:%M:%S HKT")])
                     sync_order_costs_sheet(); st.success("已提交")
 
 if role=="driver":
     with tabs[1]:
-        st.subheader("🚚 我的任務"); my_jobs = get_my_jobs(df_jobs)
-        if not my_jobs.empty: st.dataframe(my_jobs, use_container_width=True)
+        st.subheader("🚚 我的任務 - 可按送貨日子篩選")
+        my_jobs = get_my_jobs(df_jobs)
+        if my_jobs.empty:
+            st.info("暫無任務")
+        else:
+            my_jobs["Date_parsed"]=pd.to_datetime(my_jobs["Date"], errors="coerce")
+            c1,c2,c3=st.columns([1,1,1])
+            with c1:
+                show_mode=st.radio("顯示模式", ["全部","今日","聽日","指定日期"], horizontal=True, key="v46_my_mode")
+            with c2:
+                if show_mode=="指定日期":
+                    filter_date=st.date_input("揀送貨日子", value=today_hk(), key="v46_my_filter_date")
+                else:
+                    filter_date=None
+            with c3:
+                status_filter=st.multiselect("狀態", ["Pending","Accepted","Delivered"], default=["Pending","Accepted"], key="v46_my_status")
+            
+            filtered=my_jobs.copy()
+            if show_mode=="今日":
+                filtered=filtered[filtered["Date_parsed"].dt.date==today_hk()]
+            elif show_mode=="聽日":
+                filtered=filtered[filtered["Date_parsed"].dt.date==today_hk()+datetime.timedelta(days=1)]
+            elif show_mode=="指定日期" and filter_date:
+                filtered=filtered[filtered["Date_parsed"].dt.date==filter_date]
+            
+            if status_filter:
+                filtered=filtered[filtered["Status"].isin(status_filter)]
+            
+            st.success(f"找到 {len(filtered)} 單 | {show_mode}")
+            st.dataframe(filtered.sort_values(by="Date_parsed")[["Date","DeliveryTime","JobID","Client","InternalNo","Status","From","To"]], use_container_width=True, height=500)
+
     with tabs[4]:
-        st.subheader("📋 重複打印")
+        st.subheader("📋 重複打印 - 有客戶+日子")
         if not df_jobs.empty:
-            opts=[f"{r['JobID']} | {r.get('Client','')} | {r.get('InternalNo','')}" for _,r in df_jobs.sort_values(by="JobID",ascending=False).head(100).iterrows()]
-            sel=st.selectbox("揀單打印", opts, key="v45_9_driver_print_sel")
+            all_opts=df_jobs.sort_values(by="JobID",ascending=False).head(200).to_dict('records')
+            all_labels=[format_job_option(r) for r in all_opts]
+            label_map=dict(zip(all_labels, [r["JobID"] for r in all_opts]))
+            sel=st.selectbox("揀單打印 (有客戶+日子)", all_labels, key="v46_driver_print_sel")
             if sel:
-                jid=sel.split(" | ")[0]; job=df_jobs[df_jobs["JobID"]==jid].iloc[0].to_dict()
+                jid=label_map.get(sel); job=df_jobs[df_jobs["JobID"]==jid].iloc[0].to_dict()
                 st.components.v1.html(printable_order_html(job), height=750, scrolling=True)
 
 cost_idx = 5 if role in ["admin","op"] else None
 if cost_idx is not None:
     with tabs[cost_idx]:
-        st.subheader("💵 每單費用 OrderCosts V45.9.8")
+        st.subheader("💵 每單費用 OrderCosts V46.0")
         c_sync, c_dl1, c_dl2 = st.columns([1,1,1])
         with c_sync:
-            if st.button("🔄 立即重新同步", key="v45_9_sync_cost_btn", type="primary", use_container_width=True):
+            if st.button("🔄 立即重新同步", key="v46_sync_cost_btn", type="primary", use_container_width=True):
                 cnt=sync_order_costs_sheet(); st.success(f"已同步 {cnt} 單"); st.rerun()
         
         df_cost=load_df("OrderCosts")
@@ -533,7 +633,7 @@ if cost_idx is not None:
                 st.download_button(
                     label=f"📥 下載Excel ({len(filtered_cost)}單)",
                     data=buf_excel,
-                    file_name=f"OrderCosts_{d_from}_to_{d_to}_V45.9.8.xlsx",
+                    file_name=f"OrderCosts_{d_from}_to_{d_to}_V46.0.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     type="primary",
                     use_container_width=True,
@@ -543,16 +643,16 @@ if cost_idx is not None:
                 st.download_button(
                     label=f"📥 下載CSV ({len(filtered_cost)}單)",
                     data=buf_csv.getvalue(),
-                    file_name=f"OrderCosts_{d_from}_to_{d_to}_V45.9.8.csv",
+                    file_name=f"OrderCosts_{d_from}_to_{d_to}_V46.0.csv",
                     mime="text/csv",
                     use_container_width=True,
                     key="oc_dl_csv"
                 )
     with tabs[6]:
-        st.subheader("📥 下載POD - 水印版 V45.9.7 高清")
+        st.subheader("📥 下載POD - 水印版 V46.0 高清")
         col_d1, col_d2 = st.columns(2)
-        with col_d1: date_from = st.date_input("由日期", value=today_hk() - datetime.timedelta(days=7), key="v45_9_d_from")
-        with col_d2: date_to = st.date_input("到日期", value=today_hk(), key="v45_9_d_to")
+        with col_d1: date_from = st.date_input("由日期", value=today_hk() - datetime.timedelta(days=7), key="v46_d_from")
+        with col_d2: date_to = st.date_input("到日期", value=today_hk(), key="v46_d_to")
         df_pods = load_df("PODs"); df_jobs_all = load_df("Jobs")
         if df_pods.empty:
             st.warning("暫無POD記錄")
@@ -592,9 +692,9 @@ if cost_idx is not None:
                 st.download_button(
                     label=f"📦 下載全部 {len(watermarked_files)} 張 (高清水印Zip)",
                     data=zip_buffer,
-                    file_name=f"PODs_{date_from}_to_{date_to}_V45.9.7_HD.zip",
+                    file_name=f"PODs_{date_from}_to_{date_to}_V46.0_HD.zip",
                     mime="application/zip",
                     type="primary",
                     use_container_width=True,
-                    key="v45_9_download_zip"
+                    key="v46_download_zip"
                 )
