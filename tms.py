@@ -619,6 +619,100 @@ if cost_idx is not None:
         df_cost=load_df("OrderCosts")
         if not df_cost.empty:
             st.dataframe(df_cost.sort_values(by="JobID",ascending=False), use_container_width=True, height=450)
-    with tabs[6]:
-        st.subheader("📥 下載POD")
-        st.info("V46.1 POD下載同之前一樣")
+        with tabs[6]:
+        st.subheader("📥 下載POD - V46.2 修復版")
+        df_pods = load_df("PODs")
+        df_jobs_for_pod = load_df("Jobs")
+        
+        if df_pods.empty:
+            st.info("暫無POD記錄")
+        else:
+            # 合併Job資料先可以篩選日子
+            df_pods["JobID"] = df_pods["JobID"].astype(str).str.strip()
+            if not df_jobs_for_pod.empty and "JobID" in df_jobs_for_pod.columns:
+                df_jobs_for_pod["JobID"] = df_jobs_for_pod["JobID"].astype(str).str.strip()
+                df_merged = pd.merge(df_pods, df_jobs_for_pod[["JobID","Date","Client","Driver","To"]], on="JobID", how="left")
+            else:
+                df_merged = df_pods.copy()
+                df_merged["Date"] = ""
+                df_merged["Client"] = ""
+
+            df_merged["CreatedAt_HKT"] = pd.to_datetime(df_merged["CreatedAt_HKT"], errors="coerce")
+            df_merged["Date"] = pd.to_datetime(df_merged["Date"], errors="coerce")
+
+            st.markdown("#### 🔍 篩選時段")
+            c1, c2, c3, c4 = st.columns(4)
+            with c1:
+                start_date = st.date_input("開始日期", value=today_hk() - datetime.timedelta(days=7), key="v462_pod_start")
+            with c2:
+                end_date = st.date_input("結束日期", value=today_hk(), key="v462_pod_end")
+            with c3:
+                driver_list = ["全部"] + sorted(df_merged["Driver"].dropna().astype(str).unique().tolist()) if "Driver" in df_merged.columns else ["全部"]
+                sel_driver = st.selectbox("司機", driver_list, key="v462_pod_driver")
+            with c4:
+                client_list = ["全部"] + sorted(df_merged["Client"].dropna().astype(str).unique().tolist()) if "Client" in df_merged.columns else ["全部"]
+                sel_client = st.selectbox("客戶", client_list, key="v462_pod_client")
+
+            # 篩選
+            filtered = df_merged.copy()
+            if not filtered.empty:
+                filtered = filtered[(filtered["CreatedAt_HKT"].dt.date >= start_date) & (filtered["CreatedAt_HKT"].dt.date <= end_date)]
+                if sel_driver != "全部":
+                    filtered = filtered[filtered["Driver"].astype(str).str.contains(sel_driver, na=False)]
+                if sel_client != "全部":
+                    filtered = filtered[filtered["Client"].astype(str).str.contains(sel_client, na=False)]
+
+            st.success(f"找到 {len(filtered)} 張POD ({start_date} 至 {end_date})")
+
+            if not filtered.empty:
+                # 批量打包下載
+                col_dl1, col_dl2 = st.columns(2)
+                with col_dl1:
+                    if st.button(f"📦 打包下載全部 {len(filtered)} 張 (ZIP)", type="primary", use_container_width=True, key="v462_dl_zip_all"):
+                        with st.spinner("打包緊ZIP..."):
+                            zip_buffer = io.BytesIO()
+                            with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                                for _, r in filtered.iterrows():
+                                    try:
+                                        b64_str = str(r.get("Base64_Image",""))
+                                        if "," in b64_str: b64_str = b64_str.split(",",1)[1]
+                                        img_bytes = base64.b64decode(b64_str)
+                                        # 水印
+                                        wm_bytes, _ = watermark_pod_image(b64_str, r.get("JobID",""), r.get("InternalNo","") if "InternalNo" in r else "")
+                                        final_bytes = wm_bytes if wm_bytes else img_bytes
+                                        fname = f"{r.get('Date','')}_{r.get('JobID','')}_{r.get('FileName','POD.jpg')}"
+                                        fname = "".join(c for c in fname if c.isalnum() or c in "._- ").strip()
+                                        zipf.writestr(fname, final_bytes)
+                                    except Exception as e:
+                                        print(f"zip fail {e}")
+                            zip_buffer.seek(0)
+                            st.download_button("⬇️ 點擊下載ZIP", data=zip_buffer, file_name=f"POD_{start_date}_to_{end_date}.zip", mime="application/zip", key="v462_dl_btn", use_container_width=True)
+                with col_dl2:
+                    csv_buf = filtered[["JobID","Client","Date","To","FileName","CreatedAt_HKT"]].to_csv(index=False).encode('utf-8-sig')
+                    st.download_button("📄 下載清單CSV", data=csv_buf, file_name=f"POD_List_{start_date}_to_{end_date}.csv", mime="text/csv", use_container_width=True, key="v462_dl_csv")
+
+                st.divider()
+                # 逐張預覽
+                for idx, row in filtered.sort_values(by="CreatedAt_HKT", ascending=False).head(100).iterrows():
+                    with st.container(border=True):
+                        c_img, c_info = st.columns([1,2])
+                        with c_img:
+                            try:
+                                b64_str = str(row.get("Base64_Image",""))
+                                if "," in b64_str: b64_str = b64_str.split(",",1)[1]
+                                img_bytes = base64.b64decode(b64_str)
+                                st.image(img_bytes, use_container_width=True)
+                            except:
+                                st.write("圖片失效")
+                        with c_info:
+                            st.markdown(f"**{row.get('JobID','')}** | {row.get('Client','')} | {row.get('To','')}")
+                            st.caption(f"📅 POD時間: {row.get('CreatedAt_HKT','')} | 司機: {row.get('Driver','')} | 文件: {row.get('FileName','')}")
+                            try:
+                                b64_str = str(row.get("Base64_Image",""))
+                                if "," in b64_str: b64_str = b64_str.split(",",1)[1]
+                                img_bytes = base64.b64decode(b64_str)
+                                wm_bytes, _ = watermark_pod_image(b64_str, row.get("JobID",""), "")
+                                dl_bytes = wm_bytes if wm_bytes else img_bytes
+                                st.download_button(f"⬇️ 下載 {row.get('FileName','')}", data=dl_bytes, file_name=row.get('FileName','POD.jpg'), mime="image/jpeg", key=f"v462_dl_one_{idx}")
+                            except:
+                                pass
