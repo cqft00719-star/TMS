@@ -17,7 +17,7 @@ try:
 except:
     pass
 
-st.set_page_config(page_title="TMS V46.7 Pro Dashboard", layout="wide", page_icon="🚚")
+st.set_page_config(page_title="TMS V46.7.1 Pro Fix", layout="wide", page_icon="🚚")
 
 NEW_FEES = ["隧道費","登記費","停車費","交倉附加費","其他"]
 ULTRAMSG_INSTANCE = "instance194419"
@@ -333,12 +333,11 @@ def format_job_option(row):
     delivery=str(row.get("DeliveryTime",""))
     return f"{jid} | {client} | {internal} | {date} {delivery}".strip()
 
-# ================= 登入 =================
 if "user" not in st.session_state: st.session_state.user=None
 if not st.session_state.user:
-    st.title("TMS V46.7 登入 - Pro Dashboard")
+    st.title("TMS V46.7.1 登入 - Pro Dashboard Fix")
     df_u=load_df("Users"); u=st.text_input("用戶名"); p=st.text_input("密碼",type="password")
-    if st.button("登入",type="primary",key="v467_login"):
+    if st.button("登入",type="primary",key="v471_login"):
         m=df_u[(df_u["username"].astype(str).str.strip()==u.strip()) & (df_u["password"].astype(str).str.strip()==p.strip())]
         if not m.empty: st.session_state.user=m.iloc[0].to_dict(); st.rerun()
         else: st.error("帳號錯")
@@ -352,21 +351,32 @@ except Exception as e:
 
 user=st.session_state.user; role=str(user.get("role","driver")).lower(); operator=user.get("username",""); op_name=user.get("name","")
 st.sidebar.title(f"👤 {op_name} ({role})")
-st.sidebar.write(f"🔥 **V46.7 Pro Light Dashboard**")
+st.sidebar.write(f"🔥 **V46.7.1 Pro Fix**")
 last_log = get_last_daily_log()
 if last_log: st.sidebar.caption(f"上次自動發送: {last_log}")
 else: st.sidebar.caption("今日未自動發送 (17:00 HKT)")
 
-if st.sidebar.button("登出",key="v467_logout"): st.session_state.user=None; st.cache_data.clear(); st.rerun()
-if st.sidebar.button("🔄 同步OrderCosts",key="v467_clear"):
+if st.sidebar.button("登出",key="v471_logout"): st.session_state.user=None; st.cache_data.clear(); st.rerun()
+if st.sidebar.button("🔄 同步OrderCosts",key="v471_sync"):
     cnt=sync_order_costs_sheet(); st.sidebar.success(f"已同步 {cnt} 單")
-if st.sidebar.button("🔍 測試WhatsApp Group",key="v467_test_wa"):
-    ok, info = send_whatsapp_to_ops(f"[V46.7測試]{now_hk().strftime('%m/%d %H:%M')} by {operator}")
-    st.sidebar.success(f"✅ {info}") if ok else st.sidebar.error(f"❌ {info}")
-if st.sidebar.button("📦 測試每日Excel",key="v467_test_daily_excel"):
+
+# ===== V46.7.1 修復：唔用三元運算子，避免DeltaGenerator doc =====
+if st.sidebar.button("🔍 測試WhatsApp Group",key="v471_test_wa"):
+    test_msg = f"[V46.7.1測試]{now_hk().strftime('%m/%d %H:%M')} by {operator}"
+    ok, info = send_whatsapp_to_ops(test_msg)
+    if ok:
+        st.sidebar.success(f"✅ 已發送: {info[:200]}")
+    else:
+        st.sidebar.error(f"❌ 失敗: {info[:300]}")
+
+if st.sidebar.button("📦 測試每日Excel",key="v471_test_daily_excel"):
     with st.spinner("生成緊..."):
         ok, info = generate_and_send_daily_excel()
-        st.sidebar.success(f"✅ {info}") if ok else st.sidebar.warning(f"失敗 {info}")
+        if ok:
+            st.sidebar.success(f"✅ {info}")
+            write_daily_log(f"MANUAL OK {info[:100]}")
+        else:
+            st.sidebar.warning(f"失敗 {info}")
 
 if role=="admin": tabs=st.tabs(["📊 Pro Dashboard","📋 任務管理","📤 上傳Order","📸 上傳POD","💰 雜費","💵 每單費用","📥 下載POD"])
 elif role=="op": tabs=st.tabs(["📊 Pro Dashboard","📋 任務管理","📤 上傳Order","📸 上傳POD","💰 雜費","💵 每單費用","📥 下載POD"])
@@ -380,7 +390,6 @@ def get_my_jobs(df):
     mask2 = df["Driver"].astype(str).str.contains(operator, na=False) | df["Driver"].astype(str).str.contains(op_name, na=False)
     return df[mask | mask2]
 
-# ================= V46.7 PRO DASHBOARD =================
 with tabs[0]:
     if role=="driver":
         st.subheader("🟢 可接任務池")
@@ -391,7 +400,7 @@ with tabs[0]:
                 jid=row.get("JobID","")
                 with st.container(border=True):
                     st.markdown(f"**{jid}** | {row.get('Client','')} | {row.get('Date','')} {row.get('DeliveryTime','')}")
-                    if st.button("🟢 搶此單",key=f"v467_claim_{jid}_{idx}",type="primary"):
+                    if st.button("🟢 搶此單",key=f"v471_claim_{jid}_{idx}",type="primary"):
                         ws=get_sh().worksheet("Jobs"); headers=[h.strip() for h in ws.row_values(1)]; cell=ws.find(jid)
                         if cell:
                             if "Driver" in headers: ws.update_cell(cell.row, headers.index("Driver")+1, operator)
@@ -407,13 +416,12 @@ with tabs[0]:
         .section-card {background:white; border-radius:14px; padding:18px; box-shadow:0 2px 12px rgba(0,0,0,0.05); border:1px solid #eef1f6; margin-bottom:16px;}
         </style>
         """, unsafe_allow_html=True)
-        st.markdown("### 🚚 LogiTrack HK | Pro Dashboard <span style='font-size:14px;color:#6b7280'>Light Mode</span>", unsafe_allow_html=True)
+        st.markdown("### 🚚 LogiTrack HK | Pro Dashboard <span style='font-size:14px;color:#6b7280'>V46.7.1 Fix</span>", unsafe_allow_html=True)
         st.caption(f"Updated just now • Last sync: {now_hk().strftime('%H:%M HKT')} • Data as of {today_hk()}")
 
         if df_jobs.empty:
             st.info("暫無Jobs數據")
         else:
-            # 解析
             df_jobs["Date_parsed"] = pd.to_datetime(df_jobs["Date"], errors="coerce")
             df_jobs["Status_clean"] = df_jobs["Status"].astype(str).str.strip().str.title()
             df_pods["JobID"] = df_pods["JobID"].astype(str).str.strip() if not df_pods.empty else ""
@@ -426,13 +434,12 @@ with tabs[0]:
             total_jobs = len(df_jobs)
             pod_rate = (len(df_pods["JobID"].unique()) / delivered_count * 100) if delivered_count>0 else 0
 
-            # KPI 5卡
             k1,k2,k3,k4,k5 = st.columns(5)
-            with k1: st.markdown(f'<div class="kpi-card"><div class="kpi-title">📅 Total Orders Today</div><div class="kpi-value">{today_count}</div><div class="kpi-delta" style="color:#16a34a">共 {total_jobs} 單在系統</div></div>', unsafe_allow_html=True)
+            with k1: st.markdown(f'<div class="kpi-card"><div class="kpi-title">📅 Total Today</div><div class="kpi-value">{today_count}</div><div class="kpi-delta" style="color:#16a34a">共 {total_jobs} 單</div></div>', unsafe_allow_html=True)
             with k2: st.markdown(f'<div class="kpi-card"><div class="kpi-title">⏰ Pending</div><div class="kpi-value">{pending_count}</div><div class="kpi-delta" style="color:#d97706">待接單</div></div>', unsafe_allow_html=True)
             with k3: st.markdown(f'<div class="kpi-card"><div class="kpi-title">🚚 In Transit</div><div class="kpi-value" style="color:#0ea5e9">{in_transit_count}</div><div class="kpi-delta" style="color:#0ea5e9">運送中</div></div>', unsafe_allow_html=True)
             with k4: st.markdown(f'<div class="kpi-card"><div class="kpi-title">✅ Delivered</div><div class="kpi-value" style="color:#16a34a">{delivered_count}</div><div class="kpi-delta" style="color:#16a34a">已完成</div></div>', unsafe_allow_html=True)
-            with k5: st.markdown(f'<div class="kpi-card"><div class="kpi-title">📸 POD Upload Rate</div><div class="kpi-value" style="color:#7c3aed">{pod_rate:.1f}%</div><div class="kpi-delta" style="color:#7c3aed">{len(df_pods)} 張POD</div></div>', unsafe_allow_html=True)
+            with k5: st.markdown(f'<div class="kpi-card"><div class="kpi-title">📸 POD Rate</div><div class="kpi-value" style="color:#7c3aed">{pod_rate:.1f}%</div><div class="kpi-delta" style="color:#7c3aed">{len(df_pods)} 張POD</div></div>', unsafe_allow_html=True)
 
             st.write("")
             c_left, c_right = st.columns([2,1])
@@ -488,11 +495,10 @@ with tabs[0]:
                 </div>
                 </div>
                 """, unsafe_allow_html=True)
-                st.caption("靜態展示，唔用Google Map，慳Quota")
                 st.markdown('</div>', unsafe_allow_html=True)
 
                 st.markdown('<div class="section-card">', unsafe_allow_html=True)
-                st.markdown("**⚠️ POD未上傳清單 (Delivered但無POD)**")
+                st.markdown("**⚠️ POD未上傳清單**")
                 if not df_jobs.empty and not df_pods.empty:
                     delivered_jobs = set(df_jobs[df_jobs["Status_clean"].str.upper()=="DELIVERED"]["JobID"].astype(str))
                     pod_jobs = set(df_pods["JobID"].astype(str))
@@ -500,9 +506,9 @@ with tabs[0]:
                     if missing:
                         df_missing = df_jobs[df_jobs["JobID"].isin(missing)][["JobID","Client","Date","Driver","To"]].head(10)
                         st.dataframe(df_missing, use_container_width=True, height=200)
-                        st.warning(f"共有 {len(missing)} 單已送達但未上傳POD")
+                        st.warning(f"共有 {len(missing)} 單未上傳POD")
                     else:
-                        st.success("✅ 全部Delivered已上傳POD")
+                        st.success("✅ 全部已上傳POD")
                 else:
                     st.info("暫無數據")
                 st.markdown('</div>', unsafe_allow_html=True)
@@ -513,7 +519,6 @@ with tabs[0]:
             st.dataframe(recent, use_container_width=True, height=320)
             st.markdown('</div>', unsafe_allow_html=True)
 
-# 其餘Tabs保持V46.6
 if role in ["admin","op"]:
     with tabs[1]:
         st.subheader("📋 任務管理 + 打印")
@@ -527,12 +532,12 @@ if role in ["admin","op"]:
                         st.markdown(f"**{jid}** | {row.get('Client','')} | {row.get('Status','')} | Driver:{row.get('Driver','')}")
                         st.caption(f"{row.get('From','')} -> {row.get('To','')} | 📅 {row.get('Date','')} {row.get('DeliveryTime','')}")
                     with c2:
-                        if st.button("🖨️ 打印", key=f"v467_print_{jid}_{idx}"): st.session_state[f"print_{jid}"] = True
+                        if st.button("🖨️ 打印", key=f"v471_print_{jid}_{idx}"): st.session_state[f"print_{jid}"] = True
                     if st.session_state.get(f"print_{jid}"):
                         st.components.v1.html(printable_order_html(row.to_dict()), height=750, scrolling=True)
     with tabs[2]:
         st.subheader("📤 上傳Order")
-        up_file = st.file_uploader("📤 上傳Excel", type=["xlsx"], key="v467_excel_uploader")
+        up_file = st.file_uploader("📤 上傳Excel", type=["xlsx"], key="v471_excel_uploader")
         if up_file:
             try:
                 df_check = pd.read_excel(up_file, sheet_name=0, header=0, nrows=2)
@@ -540,7 +545,7 @@ if role in ["admin","op"]:
                 up_file.seek(0)
                 df_up = parse_company_export_template(up_file) if is_new_template else pd.read_excel(up_file, dtype=str).fillna("")
                 st.dataframe(df_up.head(20), use_container_width=True)
-                if st.button(f"✅ 確認批量建立 {len(df_up)} 單", type="primary", key="v467_excel_confirm"):
+                if st.button(f"✅ 確認批量建立 {len(df_up)} 單", type="primary", key="v471_excel_confirm"):
                     created=0
                     for _, r in df_up.iterrows():
                         client = str(r.get("商戶名稱","") or r.get("Client",""))
@@ -552,7 +557,7 @@ if role in ["admin","op"]:
                         append_row_by_header("Jobs", data); created+=1
                     st.success(f"🎉 批量建立 {created} 單")
             except Exception as e: st.error(f"Excel讀取失敗: {e}")
-        with st.form("v467_order_form_full"):
+        with st.form("v471_order_form_full"):
             order_date = st.date_input("📅 訂單日期", value=today_hk())
             colA, colB = st.columns(2)
             with colA:
@@ -568,16 +573,16 @@ if role in ["admin","op"]:
 
 pod_idx=3 if role in ["admin","op"] else 2
 with tabs[pod_idx]:
-    st.subheader("📸 上傳POD - V46.7")
+    st.subheader("📸 上傳POD - V46.7.1")
     my_jobs = get_my_jobs(df_jobs) if role=="driver" else df_jobs
     my_pool=my_jobs.sort_values(by="JobID",ascending=False) if not my_jobs.empty else df_jobs
     if not my_pool.empty:
         options = my_pool.to_dict('records')
         labels = [format_job_option(r) for r in options]
         label_to_jid = dict(zip(labels, [r["JobID"] for r in options]))
-        sel_label = st.selectbox("選擇JobID", labels, key="v467_pod_jid")
+        sel_label = st.selectbox("選擇JobID", labels, key="v471_pod_jid")
         jid = label_to_jid.get(sel_label, options[0]["JobID"])
-        with st.form("v467_pod_form", clear_on_submit=True):
+        with st.form("v471_pod_form", clear_on_submit=True):
             pod_files=st.file_uploader("📷 拍照上傳POD",type=["jpg","png","jpeg"],accept_multiple_files=True)
             if st.form_submit_button("📤 上傳POD + 轉Delivered", type="primary", use_container_width=True) and pod_files:
                 count_ok=0
@@ -595,9 +600,9 @@ with tabs[expense_idx]:
     my_for_expense = get_my_jobs(df_jobs) if role=="driver" else df_jobs
     if not my_for_expense.empty:
         exp_labels = [format_job_option(r) for _,r in my_for_expense.iterrows()]
-        sel_exp_label=st.selectbox("揀JobID", exp_labels, key="v467_exp_jid")
+        sel_exp_label=st.selectbox("揀JobID", exp_labels, key="v471_exp_jid")
         sel_exp_jid = sel_exp_label.split(" | ")[0]
-        with st.form("v467_expense_form"):
+        with st.form("v471_expense_form"):
             amt_tunnel = st.number_input("隧道費", min_value=0.0, step=10.0)
             amt_parking = st.number_input("停車費", min_value=0.0, step=10.0)
             amt_other = st.number_input("其他", min_value=0.0, step=10.0)
@@ -629,11 +634,11 @@ cost_idx = 5 if role in ["admin","op"] else None
 if cost_idx is not None:
     with tabs[cost_idx]:
         st.subheader("💵 每單費用 OrderCosts")
-        if st.button("🔄 重新同步", key="v467_sync_cost_btn", type="primary"): sync_order_costs_sheet(); st.rerun()
+        if st.button("🔄 重新同步", key="v471_sync_cost_btn", type="primary"): sync_order_costs_sheet(); st.rerun()
         df_cost=load_df("OrderCosts")
         if not df_cost.empty: st.dataframe(df_cost.sort_values(by="JobID",ascending=False), use_container_width=True, height=450)
     with tabs[6]:
-        st.subheader("📥 下載POD - V46.7")
+        st.subheader("📥 下載POD - V46.7.1")
         df_pods = load_df("PODs")
         if df_pods.empty: st.warning("無PODs")
         else:
