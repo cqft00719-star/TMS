@@ -5,6 +5,7 @@ from google.oauth2.service_account import Credentials
 import datetime
 from datetime import timezone, timedelta
 import uuid, io, base64, requests, zipfile, os, time
+from urllib.parse import quote
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 HKT = timezone(timedelta(hours=8))
@@ -20,18 +21,21 @@ except:
 st.set_page_config(page_title="TMS V46.9 My Tasks Fix", layout="wide", page_icon="🚚")
 
 NEW_FEES = ["隧道費","登記費","停車費","交倉附加費","其他"]
-ULTRAMSG_INSTANCE = "instance194419"
-ULTRAMSG_TOKEN = "ji5hd4t2li7vf3ys"
+# --- Evolution API (取代 Ultramsg) ---
+EVO_BASE_URL = "https://evolution-api-production-5d91de27.up.railway.app"
+EVO_INSTANCE = "my WhatsApps"
+EVO_API_KEY = st.secrets["EVO_API_KEY"]
 ULTRAMSG_GROUP_ID = "120363413020795341@g.us"
 DAILY_AUTO_HOUR = 17
 DAILY_AUTO_MINUTE = 0
 
 def send_ultramsg_message(to, body):
     try:
-        url = f"https://api.ultramsg.com/{ULTRAMSG_INSTANCE}/messages/chat"
-        payload = {"token": ULTRAMSG_TOKEN, "to": to, "body": body}
-        r = requests.post(url, data=payload, timeout=20)
-        return r.status_code == 200, r.text[:500]
+        url = f"{EVO_BASE_URL}/message/sendText/{quote(EVO_INSTANCE)}"
+        headers = {"apikey": EVO_API_KEY, "Content-Type": "application/json"}
+        payload = {"number": to, "text": body}
+        r = requests.post(url, json=payload, headers=headers, timeout=20)
+        return r.status_code in [200, 201], r.text[:500]
     except Exception as e:
         return False, str(e)
 
@@ -39,10 +43,18 @@ def send_ultramsg_document(to, file_path, caption=""):
     try:
         with open(file_path, "rb") as f:
             b64 = base64.b64encode(f.read()).decode("utf-8")
-        url = f"https://api.ultramsg.com/{ULTRAMSG_INSTANCE}/messages/document"
-        payload = {"token": ULTRAMSG_TOKEN, "to": to, "document": b64, "filename": os.path.basename(file_path), "caption": caption}
-        r = requests.post(url, data=payload, timeout=60)
-        return r.status_code == 200, r.text[:1000]
+        url = f"{EVO_BASE_URL}/message/sendMedia/{quote(EVO_INSTANCE)}"
+        headers = {"apikey": EVO_API_KEY, "Content-Type": "application/json"}
+        payload = {
+            "number": to,
+            "mediatype": "document",
+            "mimetype": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "caption": caption,
+            "media": b64,
+            "fileName": os.path.basename(file_path)
+        }
+        r = requests.post(url, json=payload, headers=headers, timeout=60)
+        return r.status_code in [200, 201], r.text[:1000]
     except Exception as e:
         return False, str(e)
 
@@ -386,18 +398,14 @@ else: tabs=st.tabs(["🟢 可接任務池","🚚 我的任務","📸 上傳POD",
 
 df_jobs=load_df("Jobs"); df_exp=load_df("Expenses"); df_pods=load_df("PODs")
 
-# ===== V46.9 核心修正 =====
 def get_my_jobs(df):
     if df.empty: return df
     if "Driver" not in df.columns: return df.iloc[0:0]
     drv = df["Driver"].astype(str).str.strip()
-    # 只用完全相等，唔用 contains，避免 Mo match到 Morning 等
     mask = (drv.str.lower() == operator.strip().lower()) | (drv.str.lower() == op_name.strip().lower())
-    # 如果 operator 同 op_name 相同，上面已經夠；如果唔同，兩個都算係我
     return df[mask].copy()
 
 def get_my_active_jobs(df):
-    # 只顯示成功搶咗、未完成嘅單
     my = get_my_jobs(df)
     if my.empty: return my
     if "Status" not in my.columns: return my
@@ -570,9 +578,7 @@ if role in ["admin","op"]:
 pod_idx=3 if role in ["admin","op"] else 2
 with tabs[pod_idx]:
     st.subheader("📸 上傳POD - 自動通知")
-    # POD只顯示未完成嘅單，送完唔再出現
     my_jobs_for_pod = get_my_active_jobs(df_jobs) if role=="driver" else df_jobs
-    # admin/op 都可以揀未完成嘅單做POD，優先顯示 Active
     if role in ["admin","op"] and not df_jobs.empty:
         active_all = df_jobs[df_jobs["Status"].astype(str).str.strip().str.upper().isin(["PENDING","ACCEPTED","IN TRANSIT","IN_TRANSIT"])]
         my_jobs_for_pod = active_all if not active_all.empty else df_jobs
@@ -631,7 +637,6 @@ if role=="driver":
         if my_active.empty:
             st.info("暫無未完成任務，去「可接任務池」搶單")
         else:
-            # 用卡片顯示，唔好一堆table
             for _, row in my_active.sort_values(by="Date", ascending=True).iterrows():
                 with st.container(border=True):
                     st.markdown(f"**{row.get('JobID','')}** | {row.get('Client','')} | {row.get('Status','')}")
