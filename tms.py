@@ -23,8 +23,6 @@ st.set_page_config(page_title="TMS V46.9 My Tasks Fix", layout="wide", page_icon
 NEW_FEES = ["隧道費","登記費","停車費","交倉附加費","其他"]
 
 # ========== SCAN Global 通行 1/11-15/11 真實箱數，已對數，總數 2494 ==========
-# 來源：15張手寫單，逐張對過總箱數
-# 15/11：TSTN已確認37，逐格加係275，紙面寫274，差1箱在 APM/KLN，暫將 KLN記為4*，以紙面274為準
 SCAN_SHOPS = ["TSTN","TSTG","TST","MK","MPMK","MOKO","CENT","HSP","CPE","CWB","CYW","AT1","AT2","ATRA","APM","KLN","TM","SH"]
 SCAN_MIN_CHARGE = [200,200,200,200,200,200,380,380,380,380,380,500,500,500,200,200,250,250]
 SCAN_PER_BOX = 5
@@ -56,7 +54,6 @@ def scan_cost_for(shop, boxes):
     return mc, mc + (boxes - included) * SCAN_PER_BOX
 
 def rebuild_tongxing_sheet():
-    """將 SCAN_BOXES 寫入 Google Sheet 通行 Tab，節省留空待計"""
     try:
         sh = get_sh()
         try:
@@ -89,11 +86,13 @@ def rebuild_tongxing_sheet():
     except Exception as e:
         return 0, str(e)
 
-# --- Evolution API (取代 Ultramsg) ---
+# --- Evolution API ---
 EVO_BASE_URL = "https://evolution-api-production-5d91de27.up.railway.app"
 EVO_INSTANCE = "my WhatsApps"
 EVO_API_KEY = st.secrets["EVO_API_KEY"]
 ULTRAMSG_GROUP_ID = "120363413020795341@g.us"
+# 累計表只 Send 俾自己，要喺 Streamlit Secrets 加：MY_WHATSAPP = "852xxxxxxxx"
+MY_WHATSAPP = st.secrets.get("MY_WHATSAPP", "")
 DAILY_AUTO_HOUR = 17
 DAILY_AUTO_MINUTE = 0
 
@@ -113,14 +112,7 @@ def send_ultramsg_document(to, file_path, caption=""):
             b64 = base64.b64encode(f.read()).decode("utf-8")
         url = f"{EVO_BASE_URL}/message/sendMedia/{quote(EVO_INSTANCE)}"
         headers = {"apikey": EVO_API_KEY, "Content-Type": "application/json"}
-        payload = {
-            "number": to,
-            "mediatype": "document",
-            "mimetype": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            "caption": caption,
-            "media": b64,
-            "fileName": os.path.basename(file_path)
-        }
+        payload = {"number": to, "mediatype": "document", "mimetype": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "caption": caption, "media": b64, "fileName": os.path.basename(file_path)}
         r = requests.post(url, json=payload, headers=headers, timeout=60)
         return r.status_code in [200, 201], r.text[:1000]
     except Exception as e:
@@ -133,28 +125,37 @@ def send_whatsapp_to_ops(message):
     except Exception as e:
         return False, str(e)
 
+def send_whatsapp_to_me(message):
+    # 累計表專用，只 Send 俾自己
+    try:
+        if not MY_WHATSAPP:
+            return False, "MY_WHATSAPP 未設定"
+        return send_ultramsg_message(MY_WHATSAPP, message)
+    except Exception as e:
+        return False, str(e)
+
 def notify_new_order(job_dict, operator_name=""):
     try:
-        msg = f"🆕【新Order】{job_dict.get('JobID','')} | {job_dict.get('InternalNo','')}\n👤 {job_dict.get('Client','')}\n📍 {job_dict.get('From','')} -> {job_dict.get('To','')}\n📅 {job_dict.get('Date','')} {job_dict.get('DeliveryTime','')}\n👷 By {operator_name} {now_hk().strftime('%H:%M HKT')}"
+        msg = f"🆕{job_dict.get('JobID','')} | {job_dict.get('InternalNo','')}\n👤 {job_dict.get('Client','')}\n📍 {job_dict.get('From','')} -> {job_dict.get('To','')}\n📅 {job_dict.get('Date','')} {job_dict.get('DeliveryTime','')}\n👷 By {operator_name} {now_hk().strftime('%H:%M HKT')}"
         send_whatsapp_to_ops(msg)
     except: pass
 
 def notify_bulk_orders(count, sample_jobs, operator_name=""):
     try:
         lines = "\n".join([f"- {j.get('JobID','')} {j.get('Client','')}" for j in sample_jobs[:5]])
-        msg = f"📦【批量建立】{count} 單 By {operator_name}\n{lines}\n{'+'+str(count-5)+'單...' if count>5 else ''} {now_hk().strftime('%H:%M HKT')}"
+        msg = f"📦{count} 單 By {operator_name}\n{lines}\n{'+'+str(count-5)+'單...' if count>5 else ''} {now_hk().strftime('%H:%M HKT')}"
         send_whatsapp_to_ops(msg)
     except: pass
 
 def notify_claim(jid, driver, client=""):
     try:
-        msg = f"🚚【搶單】{driver} 已接單 {jid} | {client} | {now_hk().strftime('%H:%M HKT')}"
+        msg = f"🚚{driver} 已接單 {jid} | {client} | {now_hk().strftime('%H:%M HKT')}"
         send_whatsapp_to_ops(msg)
     except: pass
 
 def notify_delivered(jid, driver, client="", pod_count=0):
     try:
-        msg = f"✅【已送達】{jid} | {client} | 司機:{driver} | POD:{pod_count}張 | {now_hk().strftime('%H:%M HKT')}"
+        msg = f"✅{jid} | {client} | 司機:{driver} | POD:{pod_count}張 | {now_hk().strftime('%H:%M HKT')}"
         send_whatsapp_to_ops(msg)
     except: pass
 
@@ -507,16 +508,7 @@ with tabs[0]:
                             notify_claim(jid, operator, row.get('Client',''))
                             st.success(f"已搶 {jid}，已通知WhatsApp"); st.rerun()
     else:
-        st.markdown("""
-        <style>
-        .kpi-card {background:white; border-radius:12px; padding:16px 18px; box-shadow:0 2px 8px rgba(0,0,0,0.06); border:1px solid #eef1f6;}
-        .kpi-title {font-size:13px; color:#6b7280; margin-bottom:4px;}
-        .kpi-value {font-size:28px; font-weight:800; color:#111827;}
-        .kpi-delta {font-size:12px; margin-top:4px;}
-        .section-card {background:white; border-radius:14px; padding:18px; box-shadow:0 2px 12px rgba(0,0,0,0.05); border:1px solid #eef1f6; margin-bottom:16px;}
-        </style>
-        """, unsafe_allow_html=True)
-        st.markdown("### 🚚 LogiTrack HK | Pro Dashboard <span style='font-size:14px;color:#6b7280'>V46.9</span>", unsafe_allow_html=True)
+        st.markdown("### 🚚 LogiTrack HK | Pro Dashboard V46.9")
         st.caption(f"Updated just now • Last sync: {now_hk().strftime('%H:%M HKT')} • Data as of {today_hk()} | ✅ 即時WhatsApp已啟用")
         if df_jobs.empty:
             st.info("暫無Jobs數據")
@@ -532,15 +524,14 @@ with tabs[0]:
             total_jobs = len(df_jobs)
             pod_rate = (len(df_pods["JobID"].unique()) / delivered_count * 100) if delivered_count>0 else 0
             k1,k2,k3,k4,k5 = st.columns(5)
-            with k1: st.markdown(f'<div class="kpi-card"><div class="kpi-title">📅 Total Today</div><div class="kpi-value">{today_count}</div><div class="kpi-delta" style="color:#16a34a">共 {total_jobs} 單</div></div>', unsafe_allow_html=True)
-            with k2: st.markdown(f'<div class="kpi-card"><div class="kpi-title">⏰ Pending</div><div class="kpi-value">{pending_count}</div><div class="kpi-delta" style="color:#d97706">待接單</div></div>', unsafe_allow_html=True)
-            with k3: st.markdown(f'<div class="kpi-card"><div class="kpi-title">🚚 In Transit</div><div class="kpi-value" style="color:#0ea5e9">{in_transit_count}</div><div class="kpi-delta" style="color:#0ea5e9">運送中</div></div>', unsafe_allow_html=True)
-            with k4: st.markdown(f'<div class="kpi-card"><div class="kpi-title">✅ Delivered</div><div class="kpi-value" style="color:#16a34a">{delivered_count}</div><div class="kpi-delta" style="color:#16a34a">已完成</div></div>', unsafe_allow_html=True)
-            with k5: st.markdown(f'<div class="kpi-card"><div class="kpi-title">📸 POD Rate</div><div class="kpi-value" style="color:#7c3aed">{pod_rate:.1f}%</div><div class="kpi-delta" style="color:#7c3aed">{len(df_pods)} 張POD</div></div>', unsafe_allow_html=True)
+            with k1: st.metric("📅 Total Today", today_count)
+            with k2: st.metric("⏰ Pending", pending_count)
+            with k3: st.metric("🚚 In Transit", in_transit_count)
+            with k4: st.metric("✅ Delivered", delivered_count)
+            with k5: st.metric("📸 POD Rate", f"{pod_rate:.1f}%")
             st.write("")
             c_left, c_right = st.columns([2,1])
             with c_left:
-                st.markdown('<div class="section-card">', unsafe_allow_html=True)
                 st.markdown("**📈 Daily Deliveries - Last 7 Days**")
                 last7 = [(today_hk() - datetime.timedelta(days=i)) for i in range(6,-1,-1)]
                 daily_counts = []
@@ -549,8 +540,6 @@ with tabs[0]:
                     daily_counts.append({"Date": d.strftime("%m/%d"), "Orders": cnt})
                 df_chart = pd.DataFrame(daily_counts)
                 st.bar_chart(df_chart, x="Date", y="Orders", height=280)
-                st.markdown('</div>', unsafe_allow_html=True)
-                st.markdown('<div class="section-card">', unsafe_allow_html=True)
                 st.markdown("**🏆 司機排行榜**")
                 if not df_jobs.empty and "Driver" in df_jobs.columns:
                     df_delivered = df_jobs[df_jobs["Status_clean"].str.upper()=="DELIVERED"]
@@ -560,15 +549,11 @@ with tabs[0]:
                         st.dataframe(leaderboard.head(10), use_container_width=True, height=260)
                     else:
                         st.info("本月暫無Delivered")
-                st.markdown('</div>', unsafe_allow_html=True)
             with c_right:
-                st.markdown('<div class="section-card">', unsafe_allow_html=True)
                 st.markdown("**🗺️ Zone Distribution**")
                 if "Zone" in df_jobs.columns and not df_jobs["Zone"].dropna().empty:
                     zone_counts = df_jobs["Zone"].value_counts()
                     st.bar_chart(zone_counts, height=200)
-                st.markdown('</div>', unsafe_allow_html=True)
-                st.markdown('<div class="section-card">', unsafe_allow_html=True)
                 st.markdown("**⚠️ POD未上傳清單**")
                 if not df_jobs.empty and not df_pods.empty:
                     delivered_jobs = set(df_jobs[df_jobs["Status_clean"].str.upper()=="DELIVERED"]["JobID"].astype(str))
@@ -577,12 +562,9 @@ with tabs[0]:
                     if missing:
                         df_missing = df_jobs[df_jobs["JobID"].isin(missing)][["JobID","Client","Date","Driver","To"]].head(10)
                         st.dataframe(df_missing, use_container_width=True, height=200)
-                st.markdown('</div>', unsafe_allow_html=True)
-            st.markdown('<div class="section-card">', unsafe_allow_html=True)
             st.markdown("**📋 Recent Jobs**")
             recent = df_jobs.sort_values(by="Date_parsed", ascending=False).head(10)[["JobID","Client","Zone","Status","Driver","Date","To"]]
             st.dataframe(recent, use_container_width=True, height=320)
-            st.markdown('</div>', unsafe_allow_html=True)
 
 if role in ["admin","op"]:
     with tabs[1]:
@@ -755,7 +737,7 @@ if cost_idx is not None:
                 zip_buffer.seek(0)
                 st.download_button("⬇️ 下載ZIP", data=zip_buffer, file_name=f"POD_{start_date}_to_{end_date}.zip", mime="application/zip")
 
-# ========== 通行 SCAN Tab ==========
+# ========== 通行 SCAN Tab - 累計表只 Send 俾自己 ==========
 if role in ["admin","op"]:
     with tabs[-1]:
         st.subheader("📦 通行 SCAN - 1/11-15/11")
@@ -763,7 +745,7 @@ if role in ["admin","op"]:
         with c1: st.metric("合計箱數", "2,494 箱")
         with c2: st.metric("日數", "15 日")
         with c3: st.metric("平均", "166.3 箱/日")
-        st.caption("節省：待計 · 15/11 TSTN已確認37，總數以紙面274為準 · 1/11已補真數")
+        st.caption("節省：待計 · 15/11 TSTN已確認37，總數以紙面274為準 · 累計表只 Send 俾自己")
         if st.button("🔄 一鍵寫入 1-15/11 真實箱數去 Google Sheet 通行 Tab", type="primary", key="tongxing_rebuild"):
             n, total = rebuild_tongxing_sheet()
             st.success(f"已寫入 {n} 行，合計 {total} 箱，去 Google Sheet 通行 Tab 睇")
@@ -775,7 +757,7 @@ if role in ["admin","op"]:
                 daily = df_tong.groupby("日期")["箱數(待由相片填)"].sum().reset_index()
                 st.bar_chart(daily, x="日期", y="箱數(待由相片填)")
             except: pass
-        if st.button("📩 Send 累計表去 WhatsApp Group", key="tongxing_send_wa"):
+        if st.button("📩 Send 累計表俾我自己 (唔Send去Group)", key="tongxing_send_wa"):
             df_t = load_df("通行")
             if not df_t.empty:
                 df_t["箱數(待由相片填)"] = pd.to_numeric(df_t["箱數(待由相片填)"], errors="coerce").fillna(0)
@@ -784,5 +766,5 @@ if role in ["admin","op"]:
                     lines.append(f"{d}: {int(g['箱數(待由相片填)'].sum())}箱")
                 lines.append(f"合計: {int(df_t['箱數(待由相片填)'].sum())}箱")
                 lines.append("節省：待計")
-                ok, info = send_whatsapp_to_ops("\n".join(lines))
-                st.success(f"已發送: {info[:200]}" if ok else f"失敗: {info}")
+                ok, info = send_whatsapp_to_me("\n".join(lines))
+                st.success(f"已 Send 俾你自己: {info[:200]}" if ok else f"失敗: {info} - 記得喺 Streamlit Secrets 加 MY_WHATSAPP")
