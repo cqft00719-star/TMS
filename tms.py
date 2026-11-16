@@ -21,6 +21,74 @@ except:
 st.set_page_config(page_title="TMS V46.9 My Tasks Fix", layout="wide", page_icon="🚚")
 
 NEW_FEES = ["隧道費","登記費","停車費","交倉附加費","其他"]
+
+# ========== SCAN Global 通行 1/11-15/11 真實箱數，已對數，總數 2494 ==========
+# 來源：15張手寫單，逐張對過總箱數
+# 15/11：TSTN已確認37，逐格加係275，紙面寫274，差1箱在 APM/KLN，暫將 KLN記為4*，以紙面274為準
+SCAN_SHOPS = ["TSTN","TSTG","TST","MK","MPMK","MOKO","CENT","HSP","CPE","CWB","CYW","AT1","AT2","ATRA","APM","KLN","TM","SH"]
+SCAN_MIN_CHARGE = [200,200,200,200,200,200,380,380,380,380,380,500,500,500,200,200,250,250]
+SCAN_PER_BOX = 5
+SCAN_BOXES = {
+    "2026-11-01": {"TSTN": 12, "TSTG": 20, "TST": 10, "MPMK": 21, "CPE": 5, "CYW": 16, "AT1": 17, "AT2": 7, "ATRA": 21, "SH": 7},
+    "2026-11-02": {"TSTN": 22, "TSTG": 16, "TST": 10, "MK": 37, "CENT": 22, "AT1": 12, "ATRA": 26, "APM": 8, "KLN": 5},
+    "2026-11-03": {"TSTN": 25, "TSTG": 22, "MPMK": 26, "CWB": 10, "CYW": 15, "AT1": 15, "AT2": 10, "ATRA": 19, "TM": 10},
+    "2026-11-04": {"TSTN": 9, "TSTG": 15, "TST": 11, "MK": 27, "MOKO": 17, "CENT": 15, "HSP": 9, "CPE": 8, "AT1": 16, "AT2": 7, "ATRA": 19, "APM": 6, "SH": 9},
+    "2026-11-05": {"TSTN": 21, "TSTG": 21, "MPMK": 20, "CWB": 12, "CYW": 12, "AT1": 8, "ATRA": 18, "KLN": 10, "TM": 6},
+    "2026-11-06": {"TSTN": 26, "TSTG": 10, "TST": 10, "MK": 33, "CENT": 21, "AT1": 14, "AT2": 14, "APM": 9, "KLN": 5},
+    "2026-11-07": {"TSTN": 13, "TSTG": 17, "MK": 12, "MPMK": 13, "MOKO": 10, "CPE": 8, "AT1": 18, "AT2": 10, "ATRA": 25, "SH": 5},
+    "2026-11-08": {"TSTN": 14, "TSTG": 28, "MK": 25, "MPMK": 15, "CENT": 15, "CWB": 12, "CYW": 25, "AT1": 13, "ATRA": 18, "KLN": 7},
+    "2026-11-09": {"TSTN": 22, "TSTG": 10, "TST": 10, "HSP": 6, "AT1": 7, "AT2": 5, "ATRA": 20, "APM": 9, "SH": 6},
+    "2026-11-10": {"TSTN": 15, "TSTG": 15, "MPMK": 23, "CENT": 17, "CPE": 6, "AT1": 19, "ATRA": 17},
+    "2026-11-11": {"TSTN": 20, "TSTG": 21, "TST": 10, "MK": 18, "MOKO": 14, "CWB": 8, "CYW": 31, "AT1": 22, "AT2": 9, "ATRA": 21, "APM": 8, "KLN": 7, "TM": 8, "SH": 6},
+    "2026-11-12": {"TSTN": 45, "TSTG": 28, "AT1": 13, "ATRA": 16, "SH": 7},
+    "2026-11-13": {"TSTN": 28, "TSTG": 15, "TST": 24, "MK": 57, "MPMK": 26, "MOKO": 19, "CENT": 40, "CPE": 11, "CWB": 15, "CYW": 27, "AT1": 12, "AT2": 10, "ATRA": 22, "APM": 8, "KLN": 12, "TM": 10, "SH": 6},
+    "2026-11-14": {"TSTN": 20, "TSTG": 40, "TST": 12, "MK": 23, "MPMK": 12, "HSP": 10, "AT1": 21, "ATRA": 24, "SH": 10},
+    "2026-11-15": {"TSTN": 37, "TSTG": 26, "TST": 11, "MK": 19, "MOKO": 14, "CENT": 20, "CWB": 14, "CYW": 29, "AT1": 32, "AT2": 9, "ATRA": 48, "APM": 5, "KLN": 4, "TM": 6},
+}
+
+def scan_cost_for(shop, boxes):
+    if shop not in SCAN_SHOPS:
+        return 0, 0
+    mc = SCAN_MIN_CHARGE[SCAN_SHOPS.index(shop)]
+    included = mc // SCAN_PER_BOX
+    if boxes <= included:
+        return mc, mc
+    return mc, mc + (boxes - included) * SCAN_PER_BOX
+
+def rebuild_tongxing_sheet():
+    """將 SCAN_BOXES 寫入 Google Sheet 通行 Tab，節省留空待計"""
+    try:
+        sh = get_sh()
+        try:
+            ws = sh.worksheet("通行")
+        except:
+            ws = sh.add_worksheet(title="通行", rows=3000, cols=20)
+        headers = ["日期","Shop","到訪次數(由WhatsApp Label計)","箱數(待由相片填)","原本成本","實際成本","節省","備註"]
+        ws.clear()
+        ws.update('A1', [headers])
+        rows = []
+        for d in range(1, 31):
+            ds = f"2026-11-{d:02d}"
+            if ds in SCAN_BOXES:
+                for shop in SCAN_SHOPS:
+                    if shop in SCAN_BOXES[ds]:
+                        boxes = SCAN_BOXES[ds][shop]
+                        mc, actual = scan_cost_for(shop, boxes)
+                        note = "由15張SCAN單對數入，節省待計"
+                        if ds == "2026-11-15" and shop == "KLN":
+                            note = "15/11 KLN暫記4*，TSTN已確認37，以紙面274為準"
+                        rows.append([ds, shop, 1, boxes, mc, actual, "", note])
+            elif d > 15:
+                for shop in SCAN_SHOPS:
+                    rows.append([ds, shop, "", "", "", "", "", "待補相片"])
+        for i in range(0, len(rows), 100):
+            ws.append_rows(rows[i:i+100], value_input_option='USER_ENTERED')
+            time.sleep(0.5)
+        st.cache_data.clear()
+        return len(rows), sum(sum(v.values()) for v in SCAN_BOXES.values())
+    except Exception as e:
+        return 0, str(e)
+
 # --- Evolution API (取代 Ultramsg) ---
 EVO_BASE_URL = "https://evolution-api-production-5d91de27.up.railway.app"
 EVO_INSTANCE = "my WhatsApps"
@@ -322,6 +390,7 @@ def ensure_sheets():
     add("Expenses",["ExpenseID","Date","JobID","Driver","Type","Amount","Remark","CreatedAt_HKT"])
     add("OrderCosts",["InternalNo","JobID","Date","Client","Zone","From","From_Contact","From_Phone","PickupTime","To","To_Contact","To_Phone","DeliveryTime","CargoDetail","Status","Driver","隧道費","登記費","停車費","交倉附加費","其他","TotalExpense","LastSync_HKT"])
     add("DailyLog",["Date","Time_HKT","Status","Detail","TriggeredBy"])
+    add("通行",["日期","Shop","到訪次數(由WhatsApp Label計)","箱數(待由相片填)","原本成本","實際成本","節省","備註"])
 
 def printable_order_html(job):
     jid = job.get('JobID',''); internal = job.get('InternalNo',''); client = job.get('Client',''); zone = job.get('Zone','')
@@ -392,8 +461,8 @@ if st.sidebar.button("📦 測試每日Excel",key="v469_test_daily_excel"):
         else:
             st.sidebar.warning(f"失敗 {info}")
 
-if role=="admin": tabs=st.tabs(["📊 Pro Dashboard","📋 任務管理","📤 上傳Order","📸 上傳POD","💰 雜費","💵 每單費用","📥 下載POD"])
-elif role=="op": tabs=st.tabs(["📊 Pro Dashboard","📋 任務管理","📤 上傳Order","📸 上傳POD","💰 雜費","💵 每單費用","📥 下載POD"])
+if role=="admin": tabs=st.tabs(["📊 Pro Dashboard","📋 任務管理","📤 上傳Order","📸 上傳POD","💰 雜費","💵 每單費用","📥 下載POD","📦 通行 SCAN"])
+elif role=="op": tabs=st.tabs(["📊 Pro Dashboard","📋 任務管理","📤 上傳Order","📸 上傳POD","💰 雜費","💵 每單費用","📥 下載POD","📦 通行 SCAN"])
 else: tabs=st.tabs(["🟢 可接任務池","🚚 我的任務","📸 上傳POD","💰 雜費","📋 重複打印"])
 
 df_jobs=load_df("Jobs"); df_exp=load_df("Expenses"); df_pods=load_df("PODs")
@@ -449,7 +518,6 @@ with tabs[0]:
         """, unsafe_allow_html=True)
         st.markdown("### 🚚 LogiTrack HK | Pro Dashboard <span style='font-size:14px;color:#6b7280'>V46.9</span>", unsafe_allow_html=True)
         st.caption(f"Updated just now • Last sync: {now_hk().strftime('%H:%M HKT')} • Data as of {today_hk()} | ✅ 即時WhatsApp已啟用")
-
         if df_jobs.empty:
             st.info("暫無Jobs數據")
         else:
@@ -457,21 +525,18 @@ with tabs[0]:
             df_jobs["Status_clean"] = df_jobs["Status"].astype(str).str.strip().str.title()
             df_pods["JobID"] = df_pods["JobID"].astype(str).str.strip() if not df_pods.empty else ""
             df_jobs["JobID"] = df_jobs["JobID"].astype(str).str.strip()
-
             today_count = len(df_jobs[df_jobs["Date_parsed"].dt.date == today_hk()])
             pending_count = len(df_jobs[df_jobs["Status_clean"].str.upper()=="PENDING"])
             in_transit_count = len(df_jobs[df_jobs["Status_clean"].str.upper().isin(["ACCEPTED","IN TRANSIT","IN_TRANSIT"])])
             delivered_count = len(df_jobs[df_jobs["Status_clean"].str.upper()=="DELIVERED"])
             total_jobs = len(df_jobs)
             pod_rate = (len(df_pods["JobID"].unique()) / delivered_count * 100) if delivered_count>0 else 0
-
             k1,k2,k3,k4,k5 = st.columns(5)
             with k1: st.markdown(f'<div class="kpi-card"><div class="kpi-title">📅 Total Today</div><div class="kpi-value">{today_count}</div><div class="kpi-delta" style="color:#16a34a">共 {total_jobs} 單</div></div>', unsafe_allow_html=True)
             with k2: st.markdown(f'<div class="kpi-card"><div class="kpi-title">⏰ Pending</div><div class="kpi-value">{pending_count}</div><div class="kpi-delta" style="color:#d97706">待接單</div></div>', unsafe_allow_html=True)
             with k3: st.markdown(f'<div class="kpi-card"><div class="kpi-title">🚚 In Transit</div><div class="kpi-value" style="color:#0ea5e9">{in_transit_count}</div><div class="kpi-delta" style="color:#0ea5e9">運送中</div></div>', unsafe_allow_html=True)
             with k4: st.markdown(f'<div class="kpi-card"><div class="kpi-title">✅ Delivered</div><div class="kpi-value" style="color:#16a34a">{delivered_count}</div><div class="kpi-delta" style="color:#16a34a">已完成</div></div>', unsafe_allow_html=True)
             with k5: st.markdown(f'<div class="kpi-card"><div class="kpi-title">📸 POD Rate</div><div class="kpi-value" style="color:#7c3aed">{pod_rate:.1f}%</div><div class="kpi-delta" style="color:#7c3aed">{len(df_pods)} 張POD</div></div>', unsafe_allow_html=True)
-
             st.write("")
             c_left, c_right = st.columns([2,1])
             with c_left:
@@ -689,3 +754,35 @@ if cost_idx is not None:
                         except: pass
                 zip_buffer.seek(0)
                 st.download_button("⬇️ 下載ZIP", data=zip_buffer, file_name=f"POD_{start_date}_to_{end_date}.zip", mime="application/zip")
+
+# ========== 通行 SCAN Tab ==========
+if role in ["admin","op"]:
+    with tabs[-1]:
+        st.subheader("📦 通行 SCAN - 1/11-15/11")
+        c1, c2, c3 = st.columns(3)
+        with c1: st.metric("合計箱數", "2,494 箱")
+        with c2: st.metric("日數", "15 日")
+        with c3: st.metric("平均", "166.3 箱/日")
+        st.caption("節省：待計 · 15/11 TSTN已確認37，總數以紙面274為準 · 1/11已補真數")
+        if st.button("🔄 一鍵寫入 1-15/11 真實箱數去 Google Sheet 通行 Tab", type="primary", key="tongxing_rebuild"):
+            n, total = rebuild_tongxing_sheet()
+            st.success(f"已寫入 {n} 行，合計 {total} 箱，去 Google Sheet 通行 Tab 睇")
+        df_tong = load_df("通行")
+        if not df_tong.empty:
+            st.dataframe(df_tong, use_container_width=True, height=500)
+            try:
+                df_tong["箱數(待由相片填)"] = pd.to_numeric(df_tong["箱數(待由相片填)"], errors="coerce").fillna(0)
+                daily = df_tong.groupby("日期")["箱數(待由相片填)"].sum().reset_index()
+                st.bar_chart(daily, x="日期", y="箱數(待由相片填)")
+            except: pass
+        if st.button("📩 Send 累計表去 WhatsApp Group", key="tongxing_send_wa"):
+            df_t = load_df("通行")
+            if not df_t.empty:
+                df_t["箱數(待由相片填)"] = pd.to_numeric(df_t["箱數(待由相片填)"], errors="coerce").fillna(0)
+                lines = ["📋 SCAN 通行累計表"]
+                for d, g in df_t.groupby("日期"):
+                    lines.append(f"{d}: {int(g['箱數(待由相片填)'].sum())}箱")
+                lines.append(f"合計: {int(df_t['箱數(待由相片填)'].sum())}箱")
+                lines.append("節省：待計")
+                ok, info = send_whatsapp_to_ops("\n".join(lines))
+                st.success(f"已發送: {info[:200]}" if ok else f"失敗: {info}")
