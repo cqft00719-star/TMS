@@ -71,6 +71,26 @@ def build_tongxing_matrix():
         rows.append(row)
     return rows
 
+def build_zongbiao_matrix():
+    # 運輸總表：箱數，頭行直接舖名，同你新Cap嗰張一樣
+    rows = []
+    rows.append([""] + SCAN_SHOPS + ["總箱數"])
+    for d in range(1, 31):
+        ds = f"2026-11-{d:02d}"
+        label = f"{d}-Nov"
+        boxes_map = SCAN_BOXES.get(ds, {})
+        row = [label]
+        day_total = 0
+        for shop in SCAN_SHOPS:
+            if shop in boxes_map:
+                row.append(boxes_map[shop])
+                day_total += boxes_map[shop]
+            else:
+                row.append("")
+        row.append(day_total if boxes_map else "")
+        rows.append(row)
+    return rows
+
 def rebuild_tongxing_sheet():
     try:
         sh = get_sh()
@@ -80,6 +100,12 @@ def rebuild_tongxing_sheet():
             ws = sh.add_worksheet(title="通行", rows=3000, cols=20)
         ws.clear()
         ws.update('A1', build_tongxing_matrix(), value_input_option='USER_ENTERED')
+        try:
+            ws2 = sh.worksheet("運輸總表")
+        except:
+            ws2 = sh.add_worksheet(title="運輸總表", rows=3000, cols=20)
+        ws2.clear()
+        ws2.update('A1', build_zongbiao_matrix(), value_input_option='USER_ENTERED')
         st.cache_data.clear()
         return sum(sum(v.values()) for v in SCAN_BOXES.values())
     except Exception as e:
@@ -89,31 +115,35 @@ def build_tongxing_excel_bytes():
     from openpyxl import Workbook
     from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
     wb = Workbook()
-    ws = wb.active
-    ws.title = "通行"
-    matrix = build_tongxing_matrix()
+    ws1 = wb.active
+    ws1.title = "通行"
+    ws2 = wb.create_sheet("運輸總表")
     fills = {"TSTN":"FFFF00","TSTG":"FFFF00","TST":"FFFF00","MK":"92D050","MPMK":"92D050","MOKO":"92D050","CENT":"92D050","HSP":"92D050","CPE":"92D050","CWB":"92D050","CYW":"92D050","AT1":"FF0000","AT2":"FF0000","ATRA":"FF0000","APM":"FFFF00","KLN":"FFFF00","TM":"00B0F0","SH":"00B0F0"}
     thin = Side(style="thin", color="B0B0B0")
     border = Border(left=thin, right=thin, top=thin, bottom=thin)
-    for r_idx, row in enumerate(matrix, start=1):
-        for c_idx, val in enumerate(row, start=1):
-            cell = ws.cell(row=r_idx, column=c_idx, value=val)
-            cell.border = border
-            cell.alignment = Alignment(horizontal="center", vertical="center")
-            if r_idx == 1:
-                cell.font = Font(bold=True)
-            if r_idx == 2 and 2 <= c_idx <= 19:
-                cell.fill = PatternFill("solid", fgColor=fills.get(SCAN_SHOPS[c_idx-2], "FFFFFF"))
-                cell.font = Font(bold=True)
-            if r_idx >= 3 and c_idx == 1:
-                cell.font = Font(bold=True)
-            if r_idx >= 3 and c_idx == 20 and val != "":
-                cell.font = Font(bold=True)
-    ws.column_dimensions['A'].width = 12
-    for i in range(2, 20):
-        ws.column_dimensions[chr(64+i)].width = 10
-    ws.column_dimensions['T'].width = 12
-    ws.freeze_panes = "B3"
+    for ws, matrix, is_cost in [(ws1, build_tongxing_matrix(), True), (ws2, build_zongbiao_matrix(), False)]:
+        header_row = 2 if is_cost else 1
+        for r_idx, row in enumerate(matrix, start=1):
+            for c_idx, val in enumerate(row, start=1):
+                cell = ws.cell(row=r_idx, column=c_idx, value=val)
+                cell.border = border
+                cell.alignment = Alignment(horizontal="center", vertical="center")
+                if is_cost and r_idx == 1:
+                    cell.font = Font(bold=True)
+                if r_idx == header_row and 2 <= c_idx <= 19:
+                    cell.fill = PatternFill("solid", fgColor=fills.get(SCAN_SHOPS[c_idx-2], "FFFFFF"))
+                    cell.font = Font(bold=True)
+                if r_idx == header_row and c_idx == 20:
+                    cell.font = Font(bold=True)
+                if r_idx > header_row and c_idx == 1:
+                    cell.font = Font(bold=True)
+                if r_idx > header_row and c_idx == 20 and val != "":
+                    cell.font = Font(bold=True)
+        ws.column_dimensions['A'].width = 12
+        for i in range(2, 20):
+            ws.column_dimensions[chr(64+i)].width = 10
+        ws.column_dimensions['T'].width = 12
+        ws.freeze_panes = "B3" if is_cost else "B2"
     buf = io.BytesIO()
     wb.save(buf)
     buf.seek(0)
@@ -459,6 +489,7 @@ def ensure_sheets():
     add("OrderCosts",["InternalNo","JobID","Date","Client","Zone","From","From_Contact","From_Phone","PickupTime","To","To_Contact","To_Phone","DeliveryTime","CargoDetail","Status","Driver","隧道費","登記費","停車費","交倉附加費","其他","TotalExpense","LastSync_HKT"])
     add("DailyLog",["Date","Time_HKT","Status","Detail","TriggeredBy"])
     add("通行",[""]+SCAN_SHOPS+[""])
+    add("運輸總表",[""]+SCAN_SHOPS+["總箱數"])
 
 def printable_order_html(job):
     jid = job.get('JobID','')
@@ -863,8 +894,8 @@ if cost_idx is not None:
 
 if role in ["admin","op"]:
     with tabs[-1]:
-        st.subheader("📦 通行 SCAN - 橫表，同 Sep 嗰張一樣")
-        st.caption("第1行=MIN_CHARGE · 第2行=Shop名 · 每日一行=嗰日每間舖實際成本 · T欄=日總 · 1/11-15/11 已入，合計箱數 2,494箱")
+        st.subheader("📦 通行 SCAN - 橫表")
+        st.caption("通行 = 錢 · 運輸總表 = 箱數 · 兩頁同一組箱數計出嚟")
         c1, c2, c3 = st.columns(3)
         with c1:
             st.metric("合計箱數 1-15/11", "2,494 箱")
@@ -872,14 +903,19 @@ if role in ["admin","op"]:
             st.metric("日數", "15 日")
         with c3:
             st.metric("平均", "166.3 箱/日")
-        if st.button("🔄 一鍵寫入橫表去 Google Sheet 通行 Tab", type="primary", key="tongxing_rebuild"):
+        if st.button("🔄 一鍵寫入兩頁去 Google Sheet (通行 + 運輸總表)", type="primary", key="tongxing_rebuild"):
             total = rebuild_tongxing_sheet()
-            st.success(f"已寫入橫表，合計箱數 {total}，去 Google Sheet 通行 Tab 睇")
+            st.success(f"已寫入兩頁，合計箱數 {total}，去 Google Sheet 睇 通行 + 運輸總表")
+        st.markdown("**通行 - 錢**")
         matrix = build_tongxing_matrix()
         df_show = pd.DataFrame(matrix[2:], columns=["日期"]+SCAN_SHOPS+["日總"])
-        st.dataframe(df_show, use_container_width=True, height=500)
+        st.dataframe(df_show, use_container_width=True, height=300)
+        st.markdown("**運輸總表 - 箱數**")
+        matrix2 = build_zongbiao_matrix()
+        df_show2 = pd.DataFrame(matrix2[1:], columns=["日期"]+SCAN_SHOPS+["總箱數"])
+        st.dataframe(df_show2, use_container_width=True, height=300)
         excel_bytes = build_tongxing_excel_bytes()
-        st.download_button("⬇️ 下載通行 Excel (同圖一樣格式)", data=excel_bytes, file_name=f"每月物流成本節省記錄-{today_hk().strftime('%b%Y')}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-        if st.button("📩 Send 通行 Excel 俾我自己 (唔Send去Group)", key="tongxing_send_wa"):
-            ok, info = send_excel_to_me(excel_bytes, f"每月物流成本節省記錄-{today_hk().strftime('%b%Y')}.xlsx", f"📋 每月物流成本節省記錄 {today_hk().strftime('%b%Y')} - 通行")
+        st.download_button("⬇️ 下載 Excel (通行 + 運輸總表 兩頁)", data=excel_bytes, file_name=f"每月物流成本節省記錄-{today_hk().strftime('%b%Y')}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        if st.button("📩 Send Excel 俾我自己 (兩頁，唔Send去Group)", key="tongxing_send_wa"):
+            ok, info = send_excel_to_me(excel_bytes, f"每月物流成本節省記錄-{today_hk().strftime('%b%Y')}.xlsx", f"📋 每月物流成本節省記錄 {today_hk().strftime('%b%Y')} - 通行 + 運輸總表")
             st.success(f"已 Send Excel 俾你自己: {info[:200]}" if ok else f"失敗: {info} - 記得喺 Streamlit Secrets 加 MY_WHATSAPP")
