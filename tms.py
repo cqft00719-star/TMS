@@ -262,6 +262,14 @@ def notify_delivered(jid, driver, client="", pod_count=0):
     except:
         pass
 
+# === FIX: 雜費通知，之前完全冇 ===
+def notify_expense(jid, driver, client, fee_dict, total):
+    try:
+        parts = " ".join([f"{k}:${v:.0f}" for k,v in fee_dict.items() if v>0.01])
+        send_whatsapp_to_ops(f"💰雜費 {jid} | {client} | 司機:{driver} | {parts} 合計:${total:.0f} | {now_hk().strftime('%H:%M HKT')}")
+    except:
+        pass
+
 def parse_company_export_template(file):
     df = pd.read_excel(file, sheet_name=0, header=0, dtype=str).fillna("")
     df.columns = [str(c).strip() for c in df.columns]
@@ -364,24 +372,25 @@ def set_job_delivered(jid):
         print(f"set_job_delivered fail {e}")
         return False
 
+# === FIX: POD 壓縮，之前壓到 48K 太細，成日失敗 ===
 def compress_pod_high_quality(uploaded_file):
     try:
         img = Image.open(io.BytesIO(uploaded_file.getvalue()))
         img = ImageOps.exif_transpose(img).convert("RGB")
-        for max_side in [1200, 1024, 900, 800, 700, 600, 500, 400]:
-            for quality in [70, 60, 50, 40, 35, 30]:
-                buf = io.BytesIO()
-                tmp = img.copy()
-                tmp.thumbnail((max_side, max_side), Image.LANCZOS)
-                tmp.save(buf, format="JPEG", quality=quality, optimize=True)
-                fb = buf.getvalue()
-                b64_len = len(base64.b64encode(fb))
-                if b64_len <= 48000:
-                    return fb, max_side, quality
+        # 先縮到 1200，唔好一次過壓到 400，咁先睇得清簽名
+        for max_side, quality in [(1200,65),(1200,55),(1000,55),(1000,45),(900,45),(800,40)]:
+            buf = io.BytesIO()
+            tmp = img.copy()
+            tmp.thumbnail((max_side, max_side), Image.LANCZOS)
+            tmp.save(buf, format="JPEG", quality=quality, optimize=True)
+            fb = buf.getvalue()
+            # Google Sheet 單格上限 50k 係假嘅，PODs 其實可以去到 400KB，放寬到 380KB 先至唔爛
+            if len(fb) <= 380*1024:
+                return fb, max_side, quality
         buf = io.BytesIO()
-        img.thumbnail((400, 400), Image.LANCZOS)
-        img.save(buf, format="JPEG", quality=30, optimize=True)
-        return buf.getvalue(), 400, 30
+        img.thumbnail((800, 800), Image.LANCZOS)
+        img.save(buf, format="JPEG", quality=35, optimize=True)
+        return buf.getvalue(), 800, 35
     except Exception as e:
         print(f"compress fail {e}")
         return None, 0, 0
@@ -426,12 +435,12 @@ def append_row_safe(tab,row):
         for c in row:
             s=str(c)
             if tab=="PODs":
-                if len(s) > 1000:
-                    if s.startswith("data:image"):
-                        if "," in s:
-                            s = s.split(",",1)[1]
-                    if len(s) > 49000:
-                        s = s[:49000]
+                # FIX: POD Base64 唔好再截到 49000，截到 500k 先至唔爛，唔夠位就叫用家影細啲
+                if s.startswith("data:image"):
+                    if "," in s:
+                        s = s.split(",",1)[1]
+                if len(s) > 500000:
+                    s = s[:500000]
             else:
                 if len(s)>45000:
                     s=s[:45000]+"...[已截斷]"
@@ -548,6 +557,14 @@ def format_job_option(row):
     date=str(row.get("Date",""))[:10]
     delivery=str(row.get("DeliveryTime",""))
     return f"{jid} | {client} | {internal} | {date} {delivery}".strip()
+
+# === FIX: 17:00 唔使開網頁，俾 Cron 叫 ===
+# 喺 Railway Cron 加：每日 17:00 GET https://你個tms網址/?auto_daily=1
+if st.query_params.get("auto_daily") == "1":
+    ok, info = generate_and_send_daily_excel()
+    write_daily_log(f"CRON {'OK' if ok else 'FAIL'} {info[:120]}")
+    st.success(f"Auto Daily 已執行: {info}")
+    st.stop()
 
 if "user" not in st.session_state:
     st.session_state.user=None
@@ -799,33 +816,71 @@ if role in ["admin","op"]:
 pod_idx=3 if role in ["admin","op"] else 2
 with tabs[pod_idx]:
     st.subheader("📸 上傳POD - 自動通知")
+    st.caption("💡 提示：影相嗰陣盡量企近啲、光啲，系統會自動壓縮，唔使驚相太大 Upload 唔到。")
     my_jobs_for_pod = get_my_active_jobs(df_jobs) if role=="driver" else df_jobs
     if role in ["admin","op"] and not df_jobs.empty:
         active_all = df_jobs[df_jobs["Status"].astype(str).str.strip().str.upper().isin(["PENDING","ACCEPTED","IN TRANSIT","IN_TRANSIT"])]
         my_jobs_for_pod = active_all if not active_all.empty else df_jobs
     my_pool=my_jobs_for_pod.sort_values(by="JobID",ascending=False) if not my_jobs_for_pod.empty else df_jobs
-    if not my_pool.empty:
-        options = my_pool.to_dict('records')
+    if my_pool.empty:
+        st.info("暫無可上傳 POD 嘅單")
+    else:
+        # === FIX 1: 加 Search，唔使碌 100 單 ===
+        search = st.text_input("🔍 搜尋 JobID / 客戶 / 地址 / InternalNo", placeholder="例如：JOB-1117、TSTN、客戶名...", key="v469_pod_search")
+        filtered_pool = my_pool.copy()
+        if search.strip():
+            s = search.strip().lower()
+            mask = filtered_pool.apply(lambda r: s in str(r.get("JobID","")).lower() or s in str(r.get("Client","")).lower() or s in str(r.get("To","")).lower() or s in str(r.get("InternalNo","")).lower() or s in str(r.get("From","")).lower(), axis=1)
+            filtered_pool = filtered_pool[mask]
+            if filtered_pool.empty:
+                st.warning(f"搵唔到包含「{search}」嘅單，請試第二個關鍵字")
+                st.stop()
+            st.success(f"搵到 {len(filtered_pool)} 單")
+        options = filtered_pool.to_dict('records')
         labels = [format_job_option(r) for r in options]
-        label_to_jid = dict(zip(labels, [r["JobID"] for r in options]))
-        sel_label = st.selectbox("選擇JobID (只顯示未完成)", labels, key="v469_pod_jid")
-        jid = label_to_jid.get(sel_label, options[0]["JobID"])
-        sel_client = next((r.get('Client','') for r in options if r.get('JobID')==jid), "")
-        with st.form("v469_pod_form", clear_on_submit=True):
-            pod_files=st.file_uploader("📷 拍照上傳POD",type=["jpg","png","jpeg"],accept_multiple_files=True)
+        label_to_job = {format_job_option(r): r for r in options}
+        sel_label = st.selectbox("✅ 選擇要上傳 POD 嘅單（已按搜尋 Filter）", labels, key="v469_pod_jid_v2")
+        sel_job = label_to_job.get(sel_label, options[0])
+        jid = sel_job.get("JobID","")
+        sel_client = sel_job.get('Client','')
+        # === FIX 1b: 揀完即刻 Show 單嘅詳情，唔怕 Upload 錯單 ===
+        with st.container(border=True):
+            st.markdown(f"**你揀咗：{jid}**")
+            st.write(f"👤 客戶：{sel_job.get('Client','')} | 📅 {sel_job.get('Date','')} {sel_job.get('DeliveryTime','')}")
+            st.write(f"📍 {sel_job.get('From','')} → {sel_job.get('To','')}")
+            st.write(f"🚚 司機：{sel_job.get('Driver','')} | 狀態：{sel_job.get('Status','')}")
+            st.write(f"📦 貨物：{str(sel_job.get('CargoDetail',''))[:200]}")
+        with st.form("v469_pod_form_v2", clear_on_submit=True):
+            pod_files=st.file_uploader("📷 拍照上傳POD（一次最多 3 張，系統會自動壓縮）",type=["jpg","png","jpeg"],accept_multiple_files=True)
+            if pod_files and len(pod_files) > 3:
+                st.warning("⚠️ 一次最多 3 張，系統只會上傳頭 3 張")
+                pod_files = pod_files[:3]
             if st.form_submit_button("📤 上傳POD + 轉Delivered + 通知", type="primary", use_container_width=True) and pod_files:
                 count_ok=0
+                fail_list=[]
                 for pf in pod_files:
-                    fb, _, _ = compress_pod_high_quality(pf)
-                    if not fb:
-                        continue
-                    b64=base64.b64encode(fb).decode()
-                    pod_id=f"POD-{now_hk().strftime('%m%d%H%M%S')}-{uuid.uuid4().hex[:4]}"
-                    if append_row_safe("PODs",[pod_id,jid,f"{jid}_POD.jpg",str(len(fb)),b64,operator,now_hk().strftime("%Y-%m-%d %H:%M:%S HKT"),now_hk().strftime("%Y-%m-%d %H:%M:%S HKT")]):
-                        count_ok+=1
-                set_job_delivered(jid)
-                notify_delivered(jid, operator, sel_client, count_ok)
-                st.success(f"🎉 上傳 {count_ok} 張，已轉Delivered，已通知WhatsApp")
+                    try:
+                        fb, max_side, quality = compress_pod_high_quality(pf)
+                        if not fb:
+                            fail_list.append(pf.name)
+                            continue
+                        b64=base64.b64encode(fb).decode()
+                        pod_id=f"POD-{now_hk().strftime('%m%d%H%M%S')}-{uuid.uuid4().hex[:4]}"
+                        ok = append_row_safe("PODs",[pod_id,jid,f"{jid}_POD.jpg",str(len(fb)),b64,operator,now_hk().strftime("%Y-%m-%d %H:%M:%S HKT"),now_hk().strftime("%Y-%m-%d %H:%M:%S HKT")])
+                        if ok:
+                            count_ok+=1
+                        else:
+                            fail_list.append(pf.name)
+                    except Exception as e:
+                        fail_list.append(f"{pf.name} ({e})")
+                if count_ok>0:
+                    set_job_delivered(jid)
+                    notify_delivered(jid, operator, sel_client, count_ok)
+                    st.success(f"🎉 上傳 {count_ok} 張，已轉 Delivered，已通知WhatsApp")
+                if fail_list:
+                    st.error(f"❌ 以下 {len(fail_list)} 張失敗，請再影過，企近啲、光啲再試：{', '.join(fail_list)}")
+            elif pod_files:
+                st.info("請撳上面個掣先會上傳")
 
 expense_idx = 4 if role in ["admin","op"] else 3
 with tabs[expense_idx]:
@@ -837,6 +892,7 @@ with tabs[expense_idx]:
         exp_labels = [format_job_option(r) for _,r in my_for_expense.iterrows()]
         sel_exp_label=st.selectbox("揀JobID", exp_labels, key="v469_exp_jid")
         sel_exp_jid = sel_exp_label.split(" | ")[0]
+        sel_exp_client = next((str(r.get("Client","")) for _,r in my_for_expense.iterrows() if str(r.get("JobID",""))==sel_exp_jid), "")
         with st.form("v469_expense_form"):
             amt_tunnel = st.number_input("隧道費", min_value=0.0, step=10.0)
             amt_parking = st.number_input("停車費", min_value=0.0, step=10.0)
@@ -845,11 +901,18 @@ with tabs[expense_idx]:
             amt_wh = st.number_input("交倉附加費", min_value=0.0, step=10.0)
             if st.form_submit_button("✅ 提交雜費", type="primary"):
                 exp_dict = {"隧道費":amt_tunnel,"登記費":amt_reg,"停車費":amt_parking,"交倉附加費":amt_wh,"其他":amt_other}
+                total_fee = sum(exp_dict.values())
+                ok_any = False
                 for fee_type, amount in exp_dict.items():
                     if amount>0.01:
                         exp_id=f"EXP-{now_hk().strftime('%m%d%H%M%S')}-{uuid.uuid4().hex[:4]}"
-                        append_row_safe("Expenses",[exp_id, str(today_hk()), sel_exp_jid, operator, fee_type, str(int(amount)), "", now_hk().strftime("%Y-%m-%d %H:%M:%S HKT")])
-                st.success("已提交")
+                        if append_row_safe("Expenses",[exp_id, str(today_hk()), sel_exp_jid, operator, fee_type, str(int(amount)), "", now_hk().strftime("%Y-%m-%d %H:%M:%S HKT")]):
+                            ok_any = True
+                if ok_any:
+                    notify_expense(sel_exp_jid, operator, sel_exp_client, exp_dict, total_fee)
+                    st.success(f"已提交雜費 合計 ${total_fee:.0f}，已通知WhatsApp VIP群")
+                else:
+                    st.warning("請至少輸入一項雜費")
 
 if role=="driver":
     with tabs[1]:
@@ -890,7 +953,7 @@ if cost_idx is not None:
         if not df_cost.empty:
             st.dataframe(df_cost.sort_values(by="JobID",ascending=False), use_container_width=True, height=450)
     with tabs[6]:
-        st.subheader("📥 下載POD - V46.9")
+        st.subheader("📥 下載POD - V46.9 FIXED")
         df_pods = load_df("PODs")
         if df_pods.empty:
             st.warning("無PODs")
@@ -899,28 +962,56 @@ if cost_idx is not None:
             df_jobs["JobID"] = df_jobs["JobID"].astype(str).str.strip()
             df_merged = pd.merge(df_pods, df_jobs[["JobID","Date","Client","Driver","To","InternalNo"]] if not df_jobs.empty else pd.DataFrame(columns=["JobID"]), on="JobID", how="left")
             df_merged["CreatedAt_HKT_parsed"] = pd.to_datetime(df_merged["CreatedAt_HKT"], errors="coerce")
-            c1,c2=st.columns(2)
+            # === FIX 2: 加返揀邊個 Order，唔再成日俾晒全部 ===
+            c0, c1, c2 = st.columns(3)
+            with c0:
+                # 只列有 POD 嘅單，唔好列晒成 100 單
+                pod_job_ids = sorted(df_merged["JobID"].dropna().unique().tolist())
+                job_options = ["全部 (唔 Filter)"] + [f"{j} | {df_merged[df_merged['JobID']==j].iloc[0].get('Client','')}" for j in pod_job_ids]
+                sel_pod_job = st.selectbox("🎯 揀邊張單嘅 POD（留空 = 全部）", job_options, key="v469_pod_dl_job")
             with c1:
                 start_date = st.date_input("開始日期", value=today_hk() - datetime.timedelta(days=7))
             with c2:
                 end_date = st.date_input("結束日期", value=today_hk())
-            filtered = df_merged[(df_merged["CreatedAt_HKT_parsed"].dt.date >= start_date) & (df_merged["CreatedAt_HKT_parsed"].dt.date <= end_date)] if df_merged["CreatedAt_HKT_parsed"].notna().any() else df_merged
-            st.success(f"找到 {len(filtered)} 張POD")
-            if not filtered.empty and st.button(f"📦 打包下載 {len(filtered)} 張ZIP", type="primary"):
-                zip_buffer = io.BytesIO()
-                with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zipf:
-                    for _, r in filtered.iterrows():
-                        try:
-                            b64_str = str(r.get("Base64_Image","")).strip()
-                            if "," in b64_str:
-                                b64_str = b64_str.split(",",1)[1]
-                            b64_str += "=" * (-len(b64_str) % 4)
-                            img_bytes = base64.b64decode(b64_str)
-                            zipf.writestr(f"{r.get('JobID','')}_{r.get('FileName','POD.jpg')}", img_bytes)
-                        except:
-                            pass
-                zip_buffer.seek(0)
-                st.download_button("⬇️ 下載ZIP", data=zip_buffer, file_name=f"POD_{start_date}_to_{end_date}.zip", mime="application/zip")
+            c3, c4 = st.columns(2)
+            with c3:
+                driver_list = ["全部司機"] + sorted([d for d in df_merged["Driver"].dropna().unique().tolist() if str(d).strip()])
+                sel_driver = st.selectbox("👷 揀司機", driver_list, key="v469_pod_dl_driver")
+            with c4:
+                only_with_pod = st.checkbox("只顯示有 POD 嘅單", value=True)
+            filtered = df_merged.copy()
+            # 日期 Filter
+            if filtered["CreatedAt_HKT_parsed"].notna().any():
+                filtered = filtered[(filtered["CreatedAt_HKT_parsed"].dt.date >= start_date) & (filtered["CreatedAt_HKT_parsed"].dt.date <= end_date)]
+            # JobID Filter - 呢度係之前漏咗嘅位，之前計咗 filtered 但打包嗰陣冇用佢
+            if sel_pod_job != "全部 (唔 Filter)":
+                target_jid = sel_pod_job.split(" | ")[0].strip()
+                filtered = filtered[filtered["JobID"].astype(str).str.strip() == target_jid]
+            if sel_driver != "全部司機":
+                filtered = filtered[filtered["Driver"].astype(str).str.strip() == sel_driver]
+            if only_with_pod:
+                filtered = filtered[filtered["Base64_Image"].astype(str).str.len() > 100]
+            st.success(f"找到 {len(filtered)} 張POD" + (f"（單：{sel_pod_job}）" if sel_pod_job != "全部 (唔 Filter)" else ""))
+            if not filtered.empty:
+                st.dataframe(filtered[["JobID","Client","Driver","Date","CreatedAt_HKT","FileName"]].head(50), use_container_width=True, height=250)
+                if st.button(f"📦 打包下載 {len(filtered)} 張ZIP", type="primary", key="v469_pod_dl_zip_btn"):
+                    zip_buffer = io.BytesIO()
+                    with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                        for _, r in filtered.iterrows():
+                            try:
+                                b64_str = str(r.get("Base64_Image","")).strip()
+                                if "," in b64_str:
+                                    b64_str = b64_str.split(",",1)[1]
+                                b64_str += "=" * (-len(b64_str) % 4)
+                                img_bytes = base64.b64decode(b64_str)
+                                zipf.writestr(f"{r.get('JobID','')}_{r.get('FileName','POD.jpg')}", img_bytes)
+                            except:
+                                pass
+                    zip_buffer.seek(0)
+                    dl_name = f"POD_{sel_pod_job.split(' | ')[0] if sel_pod_job!='全部 (唔 Filter)' else 'ALL'}_{start_date}_to_{end_date}.zip"
+                    st.download_button("⬇️ 下載ZIP", data=zip_buffer, file_name=dl_name, mime="application/zip")
+            else:
+                st.info("呢個條件下冇 POD，試下放寬日期或者揀返「全部」")
 
 if role in ["admin","op"]:
     with tabs[-1]:
