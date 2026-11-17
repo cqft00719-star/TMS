@@ -41,7 +41,6 @@ SCAN_BOXES = {
 }
 
 def scan_cost_for(shop, boxes):
-    # $200係基本運費，每箱$5，1-40箱係$200，第41箱起每箱加$5
     if shop not in SCAN_SHOPS:
         return 0, 0
     mc = SCAN_MIN_CHARGE[SCAN_SHOPS.index(shop)]
@@ -72,7 +71,6 @@ def build_tongxing_matrix():
     return rows
 
 def build_zongbiao_matrix():
-    # 運輸總表：箱數，頭行直接舖名，同你新Cap嗰張一樣
     rows = []
     rows.append([""] + SCAN_SHOPS + ["總箱數"])
     for d in range(1, 31):
@@ -91,23 +89,55 @@ def build_zongbiao_matrix():
         rows.append(row)
     return rows
 
+def load_scan_boxes_from_sheet():
+    try:
+        sh = get_sh()
+        ws = sh.worksheet("運輸總表")
+        vals = ws.get_all_values()
+        if len(vals) < 2:
+            return
+        for row in vals[1:]:
+            if not row or not row[0].strip():
+                continue
+            try:
+                day = row[0].split("-")[0].strip()
+                ds = f"2026-11-{int(day):02d}"
+            except:
+                continue
+            boxes = {}
+            for i, shop in enumerate(SCAN_SHOPS):
+                v = row[i+1].strip() if i+1 < len(row) else ""
+                if v and v.isdigit():
+                    boxes[shop] = int(v)
+            if boxes:
+                SCAN_BOXES[ds] = boxes
+    except Exception as e:
+        print(f"load from sheet fail: {e}")
+
 def rebuild_tongxing_sheet():
     try:
+        load_scan_boxes_from_sheet()
         sh = get_sh()
         try:
             ws = sh.worksheet("通行")
         except:
             ws = sh.add_worksheet(title="通行", rows=3000, cols=20)
         ws.clear()
+        time.sleep(1)
         ws.update('A1', build_tongxing_matrix(), value_input_option='USER_ENTERED')
+        time.sleep(1)
         try:
             ws2 = sh.worksheet("運輸總表")
         except:
             ws2 = sh.add_worksheet(title="運輸總表", rows=3000, cols=20)
         ws2.clear()
+        time.sleep(1)
         ws2.update('A1', build_zongbiao_matrix(), value_input_option='USER_ENTERED')
+        time.sleep(1)
         st.cache_data.clear()
-        return sum(sum(v.values()) for v in SCAN_BOXES.values())
+        r1 = len(ws.get_all_values())
+        r2 = len(ws2.get_all_values())
+        return f"通行 {r1}行，運輸總表 {r2}行，合計 {sum(sum(v.values()) for v in SCAN_BOXES.values())}箱"
     except Exception as e:
         return str(e)
 
@@ -898,14 +928,14 @@ if role in ["admin","op"]:
         st.caption("通行 = 錢 · 運輸總表 = 箱數 · 兩頁同一組箱數計出嚟")
         c1, c2, c3 = st.columns(3)
         with c1:
-            st.metric("合計箱數 1-15/11", "2,494 箱")
+            st.metric("合計箱數", f"{sum(sum(v.values()) for v in SCAN_BOXES.values())} 箱")
         with c2:
-            st.metric("日數", "15 日")
+            st.metric("日數", f"{len(SCAN_BOXES)} 日")
         with c3:
-            st.metric("平均", "166.3 箱/日")
+            st.metric("有數日期", ", ".join(sorted(SCAN_BOXES.keys())[-3:]))
         if st.button("🔄 一鍵寫入兩頁去 Google Sheet (通行 + 運輸總表)", type="primary", key="tongxing_rebuild"):
-            total = rebuild_tongxing_sheet()
-            st.success(f"已寫入兩頁，合計箱數 {total}，去 Google Sheet 睇 通行 + 運輸總表")
+            msg = rebuild_tongxing_sheet()
+            st.success(f"已寫入：{msg}")
         st.markdown("**通行 - 錢**")
         matrix = build_tongxing_matrix()
         df_show = pd.DataFrame(matrix[2:], columns=["日期"]+SCAN_SHOPS+["日總"])
