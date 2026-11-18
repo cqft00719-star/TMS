@@ -6,3 +6,4 @@ openpyxl
 Pillow
 requests
 streamlit-autorefresh
+google-api-python-client
