@@ -1,6 +1,4 @@
 # tms.py - TMS V46.9 My Tasks Fix
-# Streamlit TMS Apps: 司機睇單 + Upload POD
-
 import streamlit as st
 import os
 import re
@@ -15,42 +13,32 @@ from PIL import Image
 
 st.set_page_config(page_title="TMS V46.9 My Tasks", layout="wide")
 
-# ============ 設定 ============
 TMS_SHEET_ID = "15X06a1oOFeta-ETz-CiLbB-5TUWS1rWKGi35HmBNNVE"
 BOT_URL = "https://cookie-delivery-bot-production.up.railway.app"
 DRIVE_FOLDER_ID = ""
 
-# FIX: Streamlit 一定要用 st.secrets, 唔好用 os.getenv
-# Railway 嘅 app.py 用 os.getenv 就啱, Streamlit 唔同
 def get_gcp_info():
-    # 1. 先睇 st.secrets
     try:
         if "GCP_JSON" in st.secrets:
             v = st.secrets["GCP_JSON"]
-            # Secrets 入面如果係 Dict, 直接返 Dict
             if isinstance(v, dict):
                 return dict(v)
-            # 如果係 String
             s = str(v).strip()
             if s.startswith("{"):
                 return json.loads(s)
-            # 如果係 base64
             return json.loads(base64.b64decode(s).decode())
     except Exception as e:
         st.error(f"讀 st.secrets GCP_JSON 失敗: {e}")
-    # 2. 睇下有冇成個 service_account 咁樣寫入 Secrets
     try:
         if "gcp_service_account" in st.secrets:
             return dict(st.secrets["gcp_service_account"])
     except Exception:
         pass
-    # 3. 後備: os.getenv, 俾本地 Test 用
     s = os.getenv("GCP_JSON", "").strip()
     if s:
         if s.startswith("{"):
             return json.loads(s)
         return json.loads(base64.b64decode(s).decode())
-    # 4. 真係冇, 直接講明, 唔好俾 Expecting value 嗰啲難明 Error
     st.error("Secrets 入面冇 GCP_JSON, 請去 Streamlit -> Settings -> Secrets, 加返 GCP_JSON")
     st.stop()
 
@@ -68,7 +56,6 @@ def get_drive():
     from googleapiclient.discovery import build
     return build("drive", "v3", credentials=get_creds())
 
-# ============ POD 壓縮 ============
 def compress_pod(uploaded_file):
     im = Image.open(uploaded_file).convert("RGB")
     im.thumbnail((1200, 1200))
@@ -101,7 +88,6 @@ def upload_pod_to_drive(job_id, uploaded_file):
     except Exception as e:
         return False, f"Drive 失敗: {str(e)[:200]}"
 
-# ============ 讀 Jobs ============
 @st.cache_data(ttl=60)
 def load_jobs():
     try:
@@ -123,7 +109,6 @@ def find_col(headers, names):
             return n
     return None
 
-# ============ 左邊欄 ============
 with st.sidebar:
     st.markdown("### 👤 展 (driver)")
     st.markdown("🔥 V46.9 My Tasks Fix")
@@ -154,7 +139,6 @@ with st.sidebar:
         except Exception as e:
             st.error(f"失敗: {e}")
 
-# ============ 主畫面 ============
 st.markdown("💡 提示: 影相唔好咁遠, 唔好反光, 唔好影到人哋個招牌, 唔好咁多雜物, 影得近啲, 光啲, 唔好咁多字, 唔好咁多嘢, 影得近啲, 光啲再試。")
 st.markdown("🔍 搜尋 JobID / 客戶 / 地址 / InternalNo")
 search = st.text_input("例如: JOB-1117, TSTN, 客戶名...", label_visibility="collapsed")
@@ -188,16 +172,6 @@ if only_need_pod and col_status and col_status in filtered.columns:
 if filtered.empty:
     st.info("冇搵到符合嘅單")
     st.stop()
-
-def job_label(row):
-    parts = []
-    if col_job in row:
-        parts.append(str(row[col_job]))
-    if col_client in row:
-        parts.append(str(row[col_client]))
-    if col_date in row:
-        parts.append(str(row[col_date]))
-    return " | ".join([p for p in parts if p])
 
 options = []
 for idx, row in filtered.iterrows():
@@ -243,7 +217,11 @@ if st.button("📤 上傳POD + 轉Delivered + 通知", type="primary", use_conta
             st.error("以下 " + str(len(fails)) + " 張失敗: " + ", ".join(fails))
         if not fails:
             try:
-                all_vals = ws.get_all_values()
+                # FIX: 唔好再用舊 ws, 重新開一個新連線嚟更新 Sheet
+                # 舊 ws 俾 Drive 嗰邊整到唔啱用, 先會彈 AuthorizedSession 嗰個 Error
+                fresh_sh = get_sheet().open_by_key(TMS_SHEET_ID)
+                fresh_ws = fresh_sh.worksheet("Jobs")
+                all_vals = fresh_ws.get_all_values()
                 headers2 = [h.strip() for h in all_vals[0]]
                 job_col_idx = headers2.index(col_job) if col_job in headers2 else 0
                 status_col_idx = headers2.index(col_status) if col_status in headers2 else None
@@ -254,11 +232,12 @@ if st.button("📤 上傳POD + 轉Delivered + 通知", type="primary", use_conta
                         target_row = i
                         break
                 if target_row and status_col_idx is not None:
-                    ws.update_cell(target_row, status_col_idx + 1, "DELIVERED")
+                    fresh_ws.update_cell(target_row, status_col_idx + 1, "DELIVERED")
                 if target_row and pod_col_idx is not None and links:
-                    ws.update_cell(target_row, pod_col_idx + 1, " | ".join([l for l in links if l]))
+                    fresh_ws.update_cell(target_row, pod_col_idx + 1, " | ".join([l for l in links if l]))
                 st.success("✅ 上傳成功! 已轉做 DELIVERED, Bot 會喺 5 分鐘內喺 運輸 (VIP單) Group 發通知")
                 st.balloons()
+                st.cache_data.clear()
                 try:
                     requests.get(BOT_URL + "/test-jobs", timeout=20)
                 except Exception:
