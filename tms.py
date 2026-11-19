@@ -11,8 +11,6 @@ from PIL import Image, ImageDraw, ImageFont, ImageOps
 HKT = timezone(timedelta(hours=8))
 def now_hk(): return datetime.datetime.now(HKT)
 def today_hk(): return now_hk().date()
-
-# FIX: 同時支援 gcp_service_account 同 GCP_JSON
 def get_gcp_info():
     try:
         if "gcp_service_account" in st.secrets:
@@ -36,7 +34,6 @@ def get_gcp_info():
             return json.loads(s)
         return json.loads(base64.b64decode(s).decode())
     return None
-
 try:
     from streamlit_autorefresh import st_autorefresh
     st_autorefresh(interval=60*1000, key="tms_autorefresh_60s")
@@ -386,11 +383,7 @@ def set_job_delivered(jid):
     except Exception as e:
         print(f"set_job_delivered fail {e}")
         return False
-# === POD: 唔用 Drive, 返返去 Base64, 但壓到入到 Sheet 為止 ===
 def compress_pod_for_sheet(uploaded_file):
-    # Drive 之前試過唔得, 唔再試 Drive
-    # Sheet 一格最多 50000 字, Base64 要細過 49000, 即係原圖要細過 36KB
-    # 之前壓到 900KB 係錯嘅, 點都入唔到 Sheet
     try:
         img = Image.open(io.BytesIO(uploaded_file.getvalue()))
         img = ImageOps.exif_transpose(img).convert("RGB")
@@ -829,7 +822,6 @@ with tabs[pod_idx]:
             st.write(f"📍 {sel_job.get('From','')} → {sel_job.get('To','')}")
             st.write(f"🚚 司機：{sel_job.get('Driver','')} | 狀態：{sel_job.get('Status','')}")
             st.write(f"📦 貨物：{str(sel_job.get('CargoDetail',''))[:200]}")
-        # FIX: file_uploader 唔擺喺 st.form 入面, 唔用 Drive, 直接 Base64 入 Sheet
         pod_files = st.file_uploader("📷 拍照上傳POD（一次最多 3 張，系統會自動壓縮）", type=["jpg", "png", "jpeg"], accept_multiple_files=True, key="v469_pod_files_noform")
         if pod_files and len(pod_files) > 3:
             st.warning("⚠️ 一次最多 3 張，系統只會上傳頭 3 張")
@@ -995,6 +987,11 @@ if role in ["admin","op"]:
     with tabs[-1]:
         st.subheader("📦 通行 SCAN - 橫表")
         st.caption("通行 = 錢 · 運輸總表 = 箱數 · 兩頁同一組箱數計出嚟")
+        # FIX: 入去呢頁嗰陣, 即刻去 Sheet 拎最新箱數, 唔好再淨係睇 Hardcode
+        try:
+            load_scan_boxes_from_sheet()
+        except Exception as e:
+            print(f"tongxing load fail {e}")
         c1, c2, c3 = st.columns(3)
         with c1:
             st.metric("合計箱數", f"{sum(sum(v.values()) for v in SCAN_BOXES.values())} 箱")
