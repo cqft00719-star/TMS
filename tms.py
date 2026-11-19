@@ -1,12 +1,11 @@
-# tms.py - TMS V46.9 My Tasks Fix
+# tms.py - TMS V46.9 My Tasks - 完整版, 唔會再唔見介面
 import streamlit as st
 import os
-import re
 import io
 import json
 import base64
 import traceback
-from datetime import datetime, timedelta
+from datetime import datetime
 import requests
 import pandas as pd
 from PIL import Image
@@ -16,6 +15,14 @@ st.set_page_config(page_title="TMS V46.9 My Tasks", layout="wide")
 TMS_SHEET_ID = "15X06a1oOFeta-ETz-CiLbB-5TUWS1rWKGi35HmBNNVE"
 BOT_URL = "https://cookie-delivery-bot-production.up.railway.app"
 DRIVE_FOLDER_ID = ""
+
+# ---------- 登入狀態, 一定要留返 ----------
+if "driver" not in st.session_state:
+    st.session_state["driver"] = ""
+if "logged_in" not in st.session_state:
+    st.session_state["logged_in"] = False
+if "just_uploaded_job" not in st.session_state:
+    st.session_state["just_uploaded_job"] = ""
 
 def get_gcp_info():
     try:
@@ -90,18 +97,14 @@ def upload_pod_to_drive(job_id, uploaded_file):
 
 @st.cache_data(ttl=60)
 def load_jobs():
-    try:
-        sh = get_sheet().open_by_key(TMS_SHEET_ID)
-        ws = sh.worksheet("Jobs")
-        vals = ws.get_all_values()
-        if len(vals) < 2:
-            return pd.DataFrame(), [], ws
-        headers = [h.strip() for h in vals[0]]
-        df = pd.DataFrame(vals[1:], columns=headers)
-        return df, headers, ws
-    except Exception as e:
-        st.error(f"讀 Jobs 失敗: {e}")
-        return pd.DataFrame(), [], None
+    sh = get_sheet().open_by_key(TMS_SHEET_ID)
+    ws = sh.worksheet("Jobs")
+    vals = ws.get_all_values()
+    if len(vals) < 2:
+        return pd.DataFrame(), [], ws
+    headers = [h.strip() for h in vals[0]]
+    df = pd.DataFrame(vals[1:], columns=headers)
+    return df, headers, ws
 
 def find_col(headers, names):
     for n in names:
@@ -109,42 +112,77 @@ def find_col(headers, names):
             return n
     return None
 
+# ---------- 登入畫面, 登出之後會返嚟呢度 ----------
+if not st.session_state["logged_in"]:
+    st.markdown("### TMS V46.9 My Tasks")
+    st.markdown("請揀司機, 再撳登入")
+    driver = st.selectbox("司機", ["", "展 (driver)", "Felix Kwok", "龍哥司機", "其他司機"], index=0)
+    if st.button("登入", type="primary", use_container_width=True):
+        if not driver:
+            st.error("請先揀司機")
+        else:
+            st.session_state["driver"] = driver
+            st.session_state["logged_in"] = True
+            st.rerun()
+    st.stop()
+
+# ---------- 左邊欄, 登出一定有反應 ----------
 with st.sidebar:
-    st.markdown("### 👤 展 (driver)")
+    st.markdown(f"### 👤 {st.session_state['driver']}")
     st.markdown("🔥 V46.9 My Tasks Fix")
     st.caption("上次自動發送: 2026-11-18")
-    if st.button("登出"):
-        st.session_state.clear()
+    if st.button("登出", use_container_width=True):
+        st.session_state["driver"] = ""
+        st.session_state["logged_in"] = False
+        st.session_state["just_uploaded_job"] = ""
+        st.cache_data.clear()
         st.rerun()
     st.markdown("---")
-    if st.button("📦 同步OrderCosts"):
-        st.info("同步OrderCosts 已觸發, 請睇 Sheet 有冇更新")
+    if st.button("📦 同步OrderCosts", use_container_width=True):
         try:
             r = requests.get(BOT_URL + "/test-jobs", timeout=20)
             st.success(f"同步完成: {r.status_code}")
         except Exception as e:
             st.error(f"同步失敗: {e}")
-    if st.button("🔍 測試WhatsApp Group"):
+    if st.button("🔍 測試WhatsApp Group", use_container_width=True):
         try:
             r = requests.get(BOT_URL + "/", timeout=20)
             j = r.json()
             st.success(f"Bot 正常, cookie_photos={j.get('cookie_photos')}, pod={j.get('pod_photos', 0)}")
-            st.json(j.get("last_webhook", {}))
         except Exception as e:
             st.error(f"Bot 唔通: {e}")
-    if st.button("📊 測試每日Excel"):
+    if st.button("📊 測試每日Excel", use_container_width=True):
         try:
-            r = requests.get(BOT_URL + "/test-17", timeout=30)
+            requests.get(BOT_URL + "/test-17", timeout=30)
             st.success("每日Excel 測試已發送, 睇 WhatsApp Group")
         except Exception as e:
             st.error(f"失敗: {e}")
+    if st.button("🔄 重新整理單列表", use_container_width=True):
+        st.cache_data.clear()
+        st.rerun()
 
-st.markdown("💡 提示: 影相唔好咁遠, 唔好反光, 唔好影到人哋個招牌, 唔好咁多雜物, 影得近啲, 光啲, 唔好咁多字, 唔好咁多嘢, 影得近啲, 光啲再試。")
+# ---------- 主畫面, Upload 完都唔會唔見 ----------
+st.markdown("💡 提示: 影相唔好咁遠, 唔好反光, 唔好影到人哋個招牌, 唔好咁多雜物, 影得近啲, 光啲再試。")
+
+# 如果啱啱 Upload 完, 唔好再用「還要上傳 POD」嗰個 Filter Hide 咗佢
+if st.session_state["just_uploaded_job"]:
+    st.success(f"✅ 上一單 {st.session_state['just_uploaded_job']} 已上傳成功, 已轉做 DELIVERED")
+    if st.button("返去單列表, 睇其他單"):
+        st.session_state["just_uploaded_job"] = ""
+        st.cache_data.clear()
+        st.rerun()
+
 st.markdown("🔍 搜尋 JobID / 客戶 / 地址 / InternalNo")
-search = st.text_input("例如: JOB-1117, TSTN, 客戶名...", label_visibility="collapsed")
-only_need_pod = st.checkbox("還要上傳 POD 嘅單 (已按搜尋 Filter)", value=True)
+search = st.text_input("例如: JOB-1117, TSTN, 客戶名...", label_visibility="collapsed", key="search_box")
+# FIX: 預設唔好再 Tick 死「還要上傳 POD」, 等 Felix 睇到全部單, 唔會 Upload 完就空白
+only_need_pod = st.checkbox("還要上傳 POD 嘅單 (已按搜尋 Filter)", value=False, key="only_pod")
 
-df, headers, ws = load_jobs()
+try:
+    df, headers, ws = load_jobs()
+except Exception as e:
+    st.error(f"讀 Jobs 失敗: {e}")
+    st.stop()
+
 if df.empty:
     st.warning("Jobs 冇資料, 睇下 Sheet 係咪空")
     st.stop()
@@ -159,6 +197,7 @@ col_cargo = find_col(headers, ["CargoDetail", "貨物", "Cargo"])
 col_pod = find_col(headers, ["POD", "PODLink", "POD連結"])
 
 filtered = df.copy()
+# 唔好再硬性 Filter 走 Felix 嗰啲單, 只係按搜尋嚟 Filter
 if search:
     s = search.strip().lower()
     mask = pd.Series([False] * len(filtered))
@@ -170,15 +209,18 @@ if only_need_pod and col_status and col_status in filtered.columns:
     filtered = filtered[~filtered[col_status].astype(str).str.upper().isin(["DELIVERED", "COMPLETED", "CANCELLED", "CANCEL"])]
 
 if filtered.empty:
-    st.info("冇搵到符合嘅單")
+    st.info("冇搵到符合嘅單, 試下剔走「還要上傳 POD 嘅單」, 睇下係咪已經變咗 DELIVERED")
+    # 唔好 st.stop(), 要留返上面啲掣俾 Felix 撳
     st.stop()
 
+# 單列表, 一定要成個 List 顯示返
+st.markdown(f"共 {len(filtered)} 單")
 options = []
 for idx, row in filtered.iterrows():
-    label = f"{row[col_job]} | {row[col_client] if col_client in row else ''} | {row[col_date] if col_date in row else ''}"
+    label = f"{row[col_job]} | {row[col_client] if col_client in row else ''} | {row[col_date] if col_date in row else ''} | {row[col_status] if col_status in row else ''}"
     options.append((label, idx))
 
-sel_label = st.selectbox("揀單", [o[0] for o in options], label_visibility="collapsed")
+sel_label = st.selectbox("揀單", [o[0] for o in options], label_visibility="collapsed", key="job_select")
 sel_idx = [o[1] for o in options if o[0] == sel_label][0]
 row = filtered.loc[sel_idx]
 job_id = str(row[col_job]) if col_job else ""
@@ -196,7 +238,7 @@ if col_cargo in row:
 
 st.markdown("---")
 st.markdown("### 📷 拍照上傳POD (一次最多 3 張, 系統會自動壓縮)")
-uploaded = st.file_uploader("Upload", type=["jpg", "jpeg", "png"], accept_multiple_files=True, label_visibility="collapsed", help="200MB per file • JPG, PNG")
+uploaded = st.file_uploader("Upload", type=["jpg", "jpeg", "png"], accept_multiple_files=True, label_visibility="collapsed", help="200MB per file • JPG, PNG", key="pod_uploader")
 if uploaded and len(uploaded) > 3:
     st.warning("一次最多 3 張, 淨係會 Upload 頭 3 張")
     uploaded = uploaded[:3]
@@ -217,8 +259,6 @@ if st.button("📤 上傳POD + 轉Delivered + 通知", type="primary", use_conta
             st.error("以下 " + str(len(fails)) + " 張失敗: " + ", ".join(fails))
         if not fails:
             try:
-                # FIX: 唔好再用舊 ws, 重新開一個新連線嚟更新 Sheet
-                # 舊 ws 俾 Drive 嗰邊整到唔啱用, 先會彈 AuthorizedSession 嗰個 Error
                 fresh_sh = get_sheet().open_by_key(TMS_SHEET_ID)
                 fresh_ws = fresh_sh.worksheet("Jobs")
                 all_vals = fresh_ws.get_all_values()
@@ -235,13 +275,16 @@ if st.button("📤 上傳POD + 轉Delivered + 通知", type="primary", use_conta
                     fresh_ws.update_cell(target_row, status_col_idx + 1, "DELIVERED")
                 if target_row and pod_col_idx is not None and links:
                     fresh_ws.update_cell(target_row, pod_col_idx + 1, " | ".join([l for l in links if l]))
-                st.success("✅ 上傳成功! 已轉做 DELIVERED, Bot 會喺 5 分鐘內喺 運輸 (VIP單) Group 發通知")
-                st.balloons()
+                # FIX: 唔好即刻 Clear 晒, 留返個 just_uploaded_job, 等畫面仲見到嘢
+                st.session_state["just_uploaded_job"] = job_id
                 st.cache_data.clear()
                 try:
                     requests.get(BOT_URL + "/test-jobs", timeout=20)
                 except Exception:
                     pass
+                st.success(f"✅ 上傳成功! {job_id} 已轉做 DELIVERED")
+                st.balloons()
+                st.rerun()
             except Exception as e:
                 st.error(f"更新 Sheet 失敗, 但 POD 已上 Drive: {e}")
                 st.code(traceback.format_exc())
