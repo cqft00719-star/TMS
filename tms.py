@@ -1,4 +1,4 @@
-# tms.py - TMS V46.9 My Tasks - 完整版, 唔會再唔見介面
+# tms.py - TMS V46.9 My Tasks - 完整版, 司機 + Office 都用到
 import streamlit as st
 import os
 import io
@@ -16,7 +16,8 @@ TMS_SHEET_ID = "15X06a1oOFeta-ETz-CiLbB-5TUWS1rWKGi35HmBNNVE"
 BOT_URL = "https://cookie-delivery-bot-production.up.railway.app"
 DRIVE_FOLDER_ID = ""
 
-# ---------- 登入狀態, 一定要留返 ----------
+if "role" not in st.session_state:
+    st.session_state["role"] = ""
 if "driver" not in st.session_state:
     st.session_state["driver"] = ""
 if "logged_in" not in st.session_state:
@@ -112,26 +113,39 @@ def find_col(headers, names):
             return n
     return None
 
-# ---------- 登入畫面, 登出之後會返嚟呢度 ----------
+# ---------- 登入, 唔係淨係司機 ----------
 if not st.session_state["logged_in"]:
     st.markdown("### TMS V46.9 My Tasks")
-    st.markdown("請揀司機, 再撳登入")
-    driver = st.selectbox("司機", ["", "展 (driver)", "Felix Kwok", "龍哥司機", "其他司機"], index=0)
+    st.markdown("請揀身份, 再登入")
+    role = st.selectbox("身份", ["", "管理員 / Office - 睇晒全部單", "司機 - 淨係睇自己啲單"], index=0)
+    driver = ""
+    if role == "司機 - 淨係睇自己啲單":
+        driver = st.selectbox("司機", ["", "展 (driver)", "Felix Kwok", "龍哥司機", "其他司機"], index=0)
     if st.button("登入", type="primary", use_container_width=True):
-        if not driver:
-            st.error("請先揀司機")
+        if not role:
+            st.error("請先揀身份")
+        elif role.startswith("司機") and not driver:
+            st.error("請先揀司機名")
         else:
+            st.session_state["role"] = role
             st.session_state["driver"] = driver
             st.session_state["logged_in"] = True
             st.rerun()
+    st.info("管理員 / Office: 睇到全部司機、全部單, 可以跟單。司機: 淨係睇到自己嗰啲單, 去 Upload POD。")
     st.stop()
 
-# ---------- 左邊欄, 登出一定有反應 ----------
+# ---------- 左邊欄 ----------
 with st.sidebar:
-    st.markdown(f"### 👤 {st.session_state['driver']}")
-    st.markdown("🔥 V46.9 My Tasks Fix")
+    if st.session_state["role"].startswith("管理員"):
+        st.markdown("### 👤 管理員 / Office")
+        st.markdown("睇晒全部單")
+    else:
+        st.markdown(f"### 👤 {st.session_state['driver']}")
+        st.markdown("司機模式 - 淨係睇自己啲單")
+    st.markdown("🔥 V46.9 My Tasks")
     st.caption("上次自動發送: 2026-11-18")
     if st.button("登出", use_container_width=True):
+        st.session_state["role"] = ""
         st.session_state["driver"] = ""
         st.session_state["logged_in"] = False
         st.session_state["just_uploaded_job"] = ""
@@ -161,10 +175,8 @@ with st.sidebar:
         st.cache_data.clear()
         st.rerun()
 
-# ---------- 主畫面, Upload 完都唔會唔見 ----------
+# ---------- 主畫面 ----------
 st.markdown("💡 提示: 影相唔好咁遠, 唔好反光, 唔好影到人哋個招牌, 唔好咁多雜物, 影得近啲, 光啲再試。")
-
-# 如果啱啱 Upload 完, 唔好再用「還要上傳 POD」嗰個 Filter Hide 咗佢
 if st.session_state["just_uploaded_job"]:
     st.success(f"✅ 上一單 {st.session_state['just_uploaded_job']} 已上傳成功, 已轉做 DELIVERED")
     if st.button("返去單列表, 睇其他單"):
@@ -174,7 +186,6 @@ if st.session_state["just_uploaded_job"]:
 
 st.markdown("🔍 搜尋 JobID / 客戶 / 地址 / InternalNo")
 search = st.text_input("例如: JOB-1117, TSTN, 客戶名...", label_visibility="collapsed", key="search_box")
-# FIX: 預設唔好再 Tick 死「還要上傳 POD」, 等 Felix 睇到全部單, 唔會 Upload 完就空白
 only_need_pod = st.checkbox("還要上傳 POD 嘅單 (已按搜尋 Filter)", value=False, key="only_pod")
 
 try:
@@ -197,7 +208,17 @@ col_cargo = find_col(headers, ["CargoDetail", "貨物", "Cargo"])
 col_pod = find_col(headers, ["POD", "PODLink", "POD連結"])
 
 filtered = df.copy()
-# 唔好再硬性 Filter 走 Felix 嗰啲單, 只係按搜尋嚟 Filter
+# FIX: 司機先至 Filter 自己, 管理員 / Office 唔 Filter, 睇晒全部
+if st.session_state["role"].startswith("司機") and st.session_state["driver"] and col_driver in filtered.columns:
+    # 司機名可能寫法唔同, 用包含嚟對, 唔好用完全一樣
+    drv = st.session_state["driver"].split(" ")[0]
+    # 例如 Felix Kwok, 淨係用 Felix 嚟對, 等唔會因為括號而搵唔到
+    filtered = filtered[filtered[col_driver].astype(str).str.contains(drv, na=False) | (filtered[col_driver].astype(str).str.strip() == "")]
+    # 如果 Filter 完變咗空, 即係 Sheet 入面司機名唔啱, 唔好 Hide 晒, 顯示返全部俾司機揀
+    if filtered.empty:
+        st.warning(f"Sheet 入面搵唔到 {st.session_state['driver']} 嘅單, 宜家顯示返全部單俾你揀, 等你唔會見到空白頁")
+        filtered = df.copy()
+
 if search:
     s = search.strip().lower()
     mask = pd.Series([False] * len(filtered))
@@ -210,14 +231,14 @@ if only_need_pod and col_status and col_status in filtered.columns:
 
 if filtered.empty:
     st.info("冇搵到符合嘅單, 試下剔走「還要上傳 POD 嘅單」, 睇下係咪已經變咗 DELIVERED")
-    # 唔好 st.stop(), 要留返上面啲掣俾 Felix 撳
     st.stop()
 
-# 單列表, 一定要成個 List 顯示返
-st.markdown(f"共 {len(filtered)} 單")
+st.markdown(f"共 {len(filtered)} 單 - {st.session_state['role']}")
 options = []
 for idx, row in filtered.iterrows():
     label = f"{row[col_job]} | {row[col_client] if col_client in row else ''} | {row[col_date] if col_date in row else ''} | {row[col_status] if col_status in row else ''}"
+    if col_driver in row:
+        label += f" | {row[col_driver]}"
     options.append((label, idx))
 
 sel_label = st.selectbox("揀單", [o[0] for o in options], label_visibility="collapsed", key="job_select")
@@ -275,7 +296,6 @@ if st.button("📤 上傳POD + 轉Delivered + 通知", type="primary", use_conta
                     fresh_ws.update_cell(target_row, status_col_idx + 1, "DELIVERED")
                 if target_row and pod_col_idx is not None and links:
                     fresh_ws.update_cell(target_row, pod_col_idx + 1, " | ".join([l for l in links if l]))
-                # FIX: 唔好即刻 Clear 晒, 留返個 just_uploaded_job, 等畫面仲見到嘢
                 st.session_state["just_uploaded_job"] = job_id
                 st.cache_data.clear()
                 try:
