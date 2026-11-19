@@ -4,7 +4,7 @@ import gspread
 from google.oauth2.service_account import Credentials
 import datetime
 from datetime import timezone, timedelta
-import uuid, io, base64, requests, zipfile, os, time
+import uuid, io, base64, requests, zipfile, os, time, json
 from urllib.parse import quote
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
@@ -12,7 +12,7 @@ HKT = timezone(timedelta(hours=8))
 def now_hk(): return datetime.datetime.now(HKT)
 def today_hk(): return now_hk().date()
 
-# FIX 1: 同時支援 gcp_service_account 同 GCP_JSON, 唔使你去改 Secrets
+# FIX: 同時支援 gcp_service_account 同 GCP_JSON
 def get_gcp_info():
     try:
         if "gcp_service_account" in st.secrets:
@@ -386,44 +386,27 @@ def set_job_delivered(jid):
     except Exception as e:
         print(f"set_job_delivered fail {e}")
         return False
-# === FIX POD: 唔再塞 base64 入 Sheet, 上 Drive 寫 Link ===
-def save_pod_to_drive(img_bytes, filename):
-    try:
-        from googleapiclient.discovery import build
-        from googleapiclient.http import MediaIoBaseUpload
-        creds = Credentials.from_service_account_info(get_gcp_info(), scopes=["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"])
-        drive = build("drive", "v3", credentials=creds)
-        buf = io.BytesIO(img_bytes)
-        media = MediaIoBaseUpload(buf, mimetype="image/jpeg")
-        f = drive.files().create(body={"name": filename}, media_body=media, fields="id,webViewLink").execute()
-        try:
-            drive.permissions().create(fileId=f["id"], body={"type": "anyone", "role": "reader"}).execute()
-        except:
-            pass
-        return f.get("webViewLink", "") or f"https://drive.google.com/file/d/{f['id']}/view"
-    except Exception as e:
-        print(f"drive upload fail {e}")
-        return ""
-def compress_pod_high_quality(uploaded_file):
+# === POD: 唔用 Drive, 返返去 Base64, 但壓到入到 Sheet 為止 ===
+def compress_pod_for_sheet(uploaded_file):
+    # Drive 之前試過唔得, 唔再試 Drive
+    # Sheet 一格最多 50000 字, Base64 要細過 49000, 即係原圖要細過 36KB
+    # 之前壓到 900KB 係錯嘅, 點都入唔到 Sheet
     try:
         img = Image.open(io.BytesIO(uploaded_file.getvalue()))
         img = ImageOps.exif_transpose(img).convert("RGB")
-        # Drive 版: 1200px 夠清, 唔使為咗塞 Sheet 而壓到爛
-        for max_side, quality in [(1200,65),(1200,55),(1000,55),(1000,45)]:
+        for max_side, quality in [(800, 50), (600, 40), (500, 35), (400, 30), (350, 25), (300, 20)]:
             buf = io.BytesIO()
             tmp = img.copy()
             tmp.thumbnail((max_side, max_side), Image.LANCZOS)
             tmp.save(buf, format="JPEG", quality=quality, optimize=True)
             fb = buf.getvalue()
-            if len(fb) <= 900*1024:
-                return fb, max_side, quality
-        buf = io.BytesIO()
-        img.thumbnail((800, 800), Image.LANCZOS)
-        img.save(buf, format="JPEG", quality=45, optimize=True)
-        return buf.getvalue(), 800, 45
+            b64 = base64.b64encode(fb).decode()
+            if len(b64) < 49000:
+                return fb, b64
+        return None, ""
     except Exception as e:
-        print(f"compress fail {e}")
-        return None, 0, 0
+        print(f"compress for sheet fail {e}")
+        return None, ""
 @st.cache_resource
 def get_client():
     scopes = ["https://www.googleapis.com/auth/spreadsheets","https://www.googleapis.com/auth/drive"]
@@ -460,7 +443,6 @@ def append_row_safe(tab,row):
         safe_row=[]
         for c in row:
             s=str(c)
-            # FIX: 任何格都唔可以超過 49000, 超過就截, 唔好再寫 500000
             if len(s) > 49000:
                 s = s[:49000]
             safe_row.append(s)
@@ -536,7 +518,7 @@ def ensure_sheets():
             ws.update('A1',[h])
             if d:
                 ws.append_rows(d, value_input_option='USER_ENTERED')
-    add("Users",["username","password","name","role"],[["admin","admin123","Admin","admin"],["阿傑","123","阿傑","driver"],["John","John123","John","driver"],["Mo","Mo123","Mo","driver"],["op01","op01","OP01","op"],["Kit","Kit123","Kit","driver"]])
+    add("Users",["username","password","name","role"],[["admin","admin123","Admin","admin"],["阿傑","123","阿傑","driver"],["John","John123","John","driver"],["Mo","Mo123","Mo","driver"],["op01","op01","OP01","op"],["Kit","Kit123","Kit","driver"],["Felix","Felix123","Felix Kwok","driver"]])
     add("Jobs",["InternalNo","JobID","Date","Client","Zone","From","From_Contact","From_Phone","PickupTime","To","To_Contact","To_Phone","DeliveryTime","Driver","Status","CargoDetail","InternalNo","Notes","CreatedBy","CreatedAt_HKT","PodTime_HKT"])
     add("PODs",["POD_ID","JobID","FileName","Size","Base64_Image","CreatedBy","CreatedAt_HKT","PodTime_HKT"])
     add("Expenses",["ExpenseID","Date","JobID","Driver","Type","Amount","Remark","CreatedAt_HKT"])
@@ -815,7 +797,7 @@ if role in ["admin","op"]:
 pod_idx=3 if role in ["admin","op"] else 2
 with tabs[pod_idx]:
     st.subheader("📸 上傳POD - 自動通知")
-    st.caption("💡 提示：影相嗰陣盡量企近啲、光啲，系統會自動壓縮，唔使驚相太大 Upload 唔到。")
+    st.caption("💡 提示：影相嗰陣盡量企近啲、光啲，系統會自動壓縮到入到 Sheet 為止。")
     my_jobs_for_pod = get_my_jobs(df_jobs) if role=="driver" else df_jobs
     if role in ["admin","op"] and not df_jobs.empty:
         active_all = df_jobs[df_jobs["Status"].astype(str).str.strip().str.upper().isin(["PENDING","ACCEPTED","IN TRANSIT","IN_TRANSIT"])]
@@ -847,47 +829,39 @@ with tabs[pod_idx]:
             st.write(f"📍 {sel_job.get('From','')} → {sel_job.get('To','')}")
             st.write(f"🚚 司機：{sel_job.get('Driver','')} | 狀態：{sel_job.get('Status','')}")
             st.write(f"📦 貨物：{str(sel_job.get('CargoDetail',''))[:200]}")
-        with st.form("v469_pod_form_v2", clear_on_submit=True):
-            pod_files=st.file_uploader("📷 拍照上傳POD（一次最多 3 張，系統會自動壓縮）",type=["jpg","png","jpeg"],accept_multiple_files=True)
-            if pod_files and len(pod_files) > 3:
-                st.warning("⚠️ 一次最多 3 張，系統只會上傳頭 3 張")
-                pod_files = pod_files[:3]
-            if st.form_submit_button("📤 上傳POD + 轉Delivered + 通知", type="primary", use_container_width=True) and pod_files:
-                count_ok=0
-                fail_list=[]
+        # FIX: file_uploader 唔擺喺 st.form 入面, 唔用 Drive, 直接 Base64 入 Sheet
+        pod_files = st.file_uploader("📷 拍照上傳POD（一次最多 3 張，系統會自動壓縮）", type=["jpg", "png", "jpeg"], accept_multiple_files=True, key="v469_pod_files_noform")
+        if pod_files and len(pod_files) > 3:
+            st.warning("⚠️ 一次最多 3 張，系統只會上傳頭 3 張")
+            pod_files = pod_files[:3]
+        if st.button("📤 上傳POD + 轉Delivered + 通知", type="primary", use_container_width=True, key="v469_pod_upload_noform"):
+            if not pod_files:
+                st.error("請先揀相, 揀完先再撳上傳")
+            else:
+                count_ok = 0
+                fail_list = []
                 for pf in pod_files:
                     try:
-                        fb, max_side, quality = compress_pod_high_quality(pf)
-                        if not fb:
-                            fail_list.append(pf.name)
+                        fb, b64 = compress_pod_for_sheet(pf)
+                        if not fb or not b64:
+                            fail_list.append(f"{pf.name} (壓極都仲係太大, 試下影近啲、光啲)")
                             continue
-                        # FIX: 先試 Drive, 得咗就寫 Link, 唔再塞 base64
-                        link = save_pod_to_drive(fb, f"{jid}_{pf.name}")
-                        if link:
-                            store_val = link
-                        else:
-                            # Drive 失敗先 fallback 做超細 base64, 唔好超過 49000
-                            b64 = base64.b64encode(fb).decode()
-                            if len(b64) > 49000:
-                                fail_list.append(f"{pf.name} (Drive 失敗 + 相太大)")
-                                continue
-                            store_val = b64
-                        pod_id=f"POD-{now_hk().strftime('%m%d%H%M%S')}-{uuid.uuid4().hex[:4]}"
-                        ok = append_row_safe("PODs",[pod_id,jid,f"{jid}_POD.jpg",str(len(fb)),store_val,operator,now_hk().strftime("%Y-%m-%d %H:%M:%S HKT"),now_hk().strftime("%Y-%m-%d %H:%M:%S HKT")])
+                        pod_id = f"POD-{now_hk().strftime('%m%d%H%M%S')}-{uuid.uuid4().hex[:4]}"
+                        ok = append_row_safe("PODs", [pod_id, jid, f"{jid}_POD.jpg", str(len(fb)), b64, operator, now_hk().strftime("%Y-%m-%d %H:%M:%S HKT"), now_hk().strftime("%Y-%m-%d %H:%M:%S HKT")])
                         if ok:
-                            count_ok+=1
+                            count_ok += 1
                         else:
-                            fail_list.append(pf.name)
+                            fail_list.append(f"{pf.name} (寫入 PODs 失敗)")
                     except Exception as e:
                         fail_list.append(f"{pf.name} ({e})")
-                if count_ok>0:
+                if count_ok > 0:
                     set_job_delivered(jid)
                     notify_delivered(jid, operator, sel_client, count_ok)
                     st.success(f"🎉 上傳 {count_ok} 張，已轉 Delivered，已通知WhatsApp")
+                    st.balloons()
+                    st.cache_data.clear()
                 if fail_list:
-                    st.error(f"❌ 以下 {len(fail_list)} 張失敗，請再影過，企近啲、光啲再試：{', '.join(fail_list)}")
-            elif pod_files:
-                st.info("請撳上面個掣先會上傳")
+                    st.error(f"❌ 以下 {len(fail_list)} 張失敗：{', '.join(fail_list)}")
 expense_idx = 4 if role in ["admin","op"] else 3
 with tabs[expense_idx]:
     st.subheader("💰 雜費")
