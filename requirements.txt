@@ -1,9 +1,7 @@
-streamlit
-gspread
-google-auth
-pandas
-openpyxl
-Pillow
-requests
-streamlit-autorefresh
-google-api-python-client
+streamlit==1.39.0
+pandas==2.2.3
+Pillow==10.4.0
+gspread==5.12.1
+google-auth==2.22.0
+google-api-python-client==2.108.0
+requests==2.32.3
