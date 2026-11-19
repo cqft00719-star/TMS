@@ -1,6 +1,5 @@
 # tms.py - TMS V46.9 My Tasks Fix
 # Streamlit TMS Apps: 司機睇單 + Upload POD
-# 呢份係成份, 直接取代舊 tms.py, app.py 唔使郁
 
 import streamlit as st
 import os
@@ -16,19 +15,48 @@ from PIL import Image
 
 st.set_page_config(page_title="TMS V46.9 My Tasks", layout="wide")
 
-# ============ 設定 - 唔好改, 同 app.py 嗰邊對返 ============
-TMS_SHEET_ID = os.getenv("TMS_SHEET_ID", "15X06a1oOFeta-ETz-CiLbB-5TUWS1rWKGi35HmBNNVE")
-GCP_JSON = os.getenv("GCP_JSON", "")
-BOT_URL = os.getenv("BOT_URL", "https://cookie-delivery-bot-production.up.railway.app")
-DRIVE_FOLDER_ID = os.getenv("POD_DRIVE_FOLDER_ID", "")
-# 如果你 Drive POD Folder 冇 ID, 留空都得, 會淨係更新 Sheet, 唔會 Fail
+# ============ 設定 ============
+TMS_SHEET_ID = "15X06a1oOFeta-ETz-CiLbB-5TUWS1rWKGi35HmBNNVE"
+BOT_URL = "https://cookie-delivery-bot-production.up.railway.app"
+DRIVE_FOLDER_ID = ""
+
+# FIX: Streamlit 一定要用 st.secrets, 唔好用 os.getenv
+# Railway 嘅 app.py 用 os.getenv 就啱, Streamlit 唔同
+def get_gcp_info():
+    # 1. 先睇 st.secrets
+    try:
+        if "GCP_JSON" in st.secrets:
+            v = st.secrets["GCP_JSON"]
+            # Secrets 入面如果係 Dict, 直接返 Dict
+            if isinstance(v, dict):
+                return dict(v)
+            # 如果係 String
+            s = str(v).strip()
+            if s.startswith("{"):
+                return json.loads(s)
+            # 如果係 base64
+            return json.loads(base64.b64decode(s).decode())
+    except Exception as e:
+        st.error(f"讀 st.secrets GCP_JSON 失敗: {e}")
+    # 2. 睇下有冇成個 service_account 咁樣寫入 Secrets
+    try:
+        if "gcp_service_account" in st.secrets:
+            return dict(st.secrets["gcp_service_account"])
+    except Exception:
+        pass
+    # 3. 後備: os.getenv, 俾本地 Test 用
+    s = os.getenv("GCP_JSON", "").strip()
+    if s:
+        if s.startswith("{"):
+            return json.loads(s)
+        return json.loads(base64.b64decode(s).decode())
+    # 4. 真係冇, 直接講明, 唔好俾 Expecting value 嗰啲難明 Error
+    st.error("Secrets 入面冇 GCP_JSON, 請去 Streamlit -> Settings -> Secrets, 加返 GCP_JSON")
+    st.stop()
 
 def get_creds():
     from google.oauth2.service_account import Credentials
-    s = GCP_JSON.strip()
-    if not s.startswith("{"):
-        s = base64.b64decode(s).decode()
-    info = json.loads(s)
+    info = get_gcp_info()
     scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
     return Credentials.from_service_account_info(info, scopes=scopes)
 
@@ -40,9 +68,8 @@ def get_drive():
     from googleapiclient.discovery import build
     return build("drive", "v3", credentials=get_creds())
 
-# ============ POD 壓縮 - 呢度係今次 Fix 嘅重點 ============
+# ============ POD 壓縮 ============
 def compress_pod(uploaded_file):
-    # 一定要用壓縮完嘅 data, 唔好用原圖 size 嚟判
     im = Image.open(uploaded_file).convert("RGB")
     im.thumbnail((1200, 1200))
     for quality in [70, 55, 40, 30]:
@@ -58,15 +85,12 @@ def compress_pod(uploaded_file):
     return buf.getvalue(), len(buf.getvalue())
 
 def upload_pod_to_drive(job_id, uploaded_file):
-    # 返 (ok, link_or_error)
     try:
         if not DRIVE_FOLDER_ID:
             return True, ""
         from googleapiclient.http import MediaIoBaseUpload
         drive = get_drive()
-        # 檔名唔好有括號、空格, 用 JOB + 時間
         safe_name = f"{job_id}_POD_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
-        # FIX: 用 compress 完嗰個 data, 唔好用 uploaded_file.getvalue()
         data, final_size = compress_pod(uploaded_file)
         if final_size > 2 * 1024 * 1024:
             return False, f"壓縮完仲係 {final_size//1024}KB, 太大"
@@ -99,11 +123,11 @@ def find_col(headers, names):
             return n
     return None
 
-# ============ 左邊欄 - 原本功能全部保留 ============
+# ============ 左邊欄 ============
 with st.sidebar:
     st.markdown("### 👤 展 (driver)")
     st.markdown("🔥 V46.9 My Tasks Fix")
-    st.caption(f"上次自動發送: 2026-11-18")
+    st.caption("上次自動發送: 2026-11-18")
     if st.button("登出"):
         st.session_state.clear()
         st.rerun()
@@ -141,7 +165,6 @@ if df.empty:
     st.warning("Jobs 冇資料, 睇下 Sheet 係咪空")
     st.stop()
 
-# 欄名對應 - 唔好改, 要對返你 Sheet 嗰啲欄
 col_job = find_col(headers, ["JobID", "InternalNo", "單號"])
 col_client = find_col(headers, ["Client", "客戶"])
 col_date = find_col(headers, ["Date", "送貨日期"])
@@ -151,7 +174,6 @@ col_status = find_col(headers, ["Status", "狀態"])
 col_cargo = find_col(headers, ["CargoDetail", "貨物", "Cargo"])
 col_pod = find_col(headers, ["POD", "PODLink", "POD連結"])
 
-# Filter
 filtered = df.copy()
 if search:
     s = search.strip().lower()
@@ -161,33 +183,25 @@ if search:
             mask = mask | filtered[c].astype(str).str.lower().str.contains(s, na=False)
     filtered = filtered[mask]
 if only_need_pod and col_status and col_status in filtered.columns:
-    # 未 Delivered 嘅先係要上傳 POD
     filtered = filtered[~filtered[col_status].astype(str).str.upper().isin(["DELIVERED", "COMPLETED", "CANCELLED", "CANCEL"])]
 
 if filtered.empty:
     st.info("冇搵到符合嘅單")
     st.stop()
 
-# 下拉揀單 - 格式同你 Cap 圖一樣
 def job_label(row):
     parts = []
     if col_job in row:
         parts.append(str(row[col_job]))
     if col_client in row:
         parts.append(str(row[col_client]))
-    if col_job in row:
-        # 唔好重複, 呢度加 InternalNo 嗰類
-        pass
     if col_date in row:
         parts.append(str(row[col_date]))
     return " | ".join([p for p in parts if p])
 
 options = []
 for idx, row in filtered.iterrows():
-    label = job_label(row)
-    # 加埋 InternalNo / 3RTSA 嗰啲, 等司機易搵
-    if col_job in row:
-        label = f"{row[col_job]} | {row[col_client] if col_client in row else ''} | {row[col_date] if col_date in row else ''}"
+    label = f"{row[col_job]} | {row[col_client] if col_client in row else ''} | {row[col_date] if col_date in row else ''}"
     options.append((label, idx))
 
 sel_label = st.selectbox("揀單", [o[0] for o in options], label_visibility="collapsed")
@@ -195,7 +209,6 @@ sel_idx = [o[1] for o in options if o[0] == sel_label][0]
 row = filtered.loc[sel_idx]
 job_id = str(row[col_job]) if col_job else ""
 
-# 顯示單嘅詳情
 st.markdown("---")
 st.markdown(f"### 你揀咗: {job_id}")
 if col_client in row:
@@ -207,7 +220,6 @@ if col_driver in row:
 if col_cargo in row:
     st.markdown(f"📦 貨物: {row[col_cargo]}")
 
-# ============ POD 上傳 - Fix 咗喺呢度 ============
 st.markdown("---")
 st.markdown("### 📷 拍照上傳POD (一次最多 3 張, 系統會自動壓縮)")
 uploaded = st.file_uploader("Upload", type=["jpg", "jpeg", "png"], accept_multiple_files=True, label_visibility="collapsed", help="200MB per file • JPG, PNG")
@@ -228,12 +240,9 @@ if st.button("📤 上傳POD + 轉Delivered + 通知", type="primary", use_conta
             else:
                 fails.append(f"{f.name} ({msg})")
         if fails:
-            # 唔好再寫「請再影過, 企近啲、光啲再試」, 因為唔係影相問題
             st.error("以下 " + str(len(fails)) + " 張失敗: " + ", ".join(fails))
         if not fails:
-            # 全部 Upload 成功, 先至更新 Sheet 做 Delivered
             try:
-                # 搵返 Jobs 嗰頁, 嗰單係第幾行
                 all_vals = ws.get_all_values()
                 headers2 = [h.strip() for h in all_vals[0]]
                 job_col_idx = headers2.index(col_job) if col_job in headers2 else 0
@@ -248,9 +257,8 @@ if st.button("📤 上傳POD + 轉Delivered + 通知", type="primary", use_conta
                     ws.update_cell(target_row, status_col_idx + 1, "DELIVERED")
                 if target_row and pod_col_idx is not None and links:
                     ws.update_cell(target_row, pod_col_idx + 1, " | ".join([l for l in links if l]))
-                st.success(f"✅ 上傳成功! 已轉做 DELIVERED, Bot 會喺 5 分鐘內喺 運輸 (VIP單) Group 發通知")
+                st.success("✅ 上傳成功! 已轉做 DELIVERED, Bot 會喺 5 分鐘內喺 運輸 (VIP單) Group 發通知")
                 st.balloons()
-                # 叫 Bot 即刻 Check 一次, 唔使等 5 分鐘
                 try:
                     requests.get(BOT_URL + "/test-jobs", timeout=20)
                 except Exception:
