@@ -351,14 +351,9 @@ def write_daily_log(status):
     except Exception as e:
         print(f"DailyLog write fail {e}")
 def check_and_auto_send_daily():
-    now = now_hk()
-    if now.hour < DAILY_AUTO_HOUR or (now.hour == DAILY_AUTO_HOUR and now.minute < DAILY_AUTO_MINUTE):
-        return
-    last = get_last_daily_log()
-    if last == str(today_hk()):
-        return
-    ok, info = generate_and_send_daily_excel()
-    write_daily_log(f"{'OK' if ok else 'FAIL'} {info[:120]}")
+    # FIX B: 呢個自動 Send 已經停用, 17:00 自動改由 app.py 負責, 唔好再喺 tms.py 入面自動 Send
+    # 保留呢個 Function 係為咗唔好令到其他位報錯, 但係唔會再真係 Send
+    return
 def set_job_delivered(jid):
     try:
         ws = get_sh().worksheet("Jobs")
@@ -545,10 +540,11 @@ def format_job_option(row):
     date=str(row.get("Date",""))[:10]
     delivery=str(row.get("DeliveryTime",""))
     return f"{jid} | {client} | {internal} | {date} {delivery}".strip()
+# FIX B: ?auto_daily=1 保留返俾你手動撳, 但係要寫明係手動, 唔好再當係自動
 if st.query_params.get("auto_daily") == "1":
     ok, info = generate_and_send_daily_excel()
-    write_daily_log(f"CRON {'OK' if ok else 'FAIL'} {info[:120]}")
-    st.success(f"Auto Daily 已執行: {info}")
+    write_daily_log(f"MANUAL auto_daily=1 {'OK' if ok else 'FAIL'} {info[:120]}")
+    st.success(f"手動每日提醒已執行 (auto_daily=1): {info}")
     st.stop()
 if "user" not in st.session_state:
     st.session_state.user=None
@@ -566,10 +562,8 @@ if not st.session_state.user:
             st.error("帳號錯")
     st.stop()
 ensure_sheets()
-try:
-    check_and_auto_send_daily()
-except Exception as e:
-    print(f"auto daily fail {e}")
+# FIX B: 自動 Send 已經停用, 呢度唔好再自動跑 check_and_auto_send_daily(), 17:00 由 app.py 負責
+# try: check_and_auto_send_daily() 已停用
 user=st.session_state.user
 role=str(user.get("role","driver")).lower()
 operator=user.get("username","")
@@ -580,7 +574,7 @@ last_log = get_last_daily_log()
 if last_log:
     st.sidebar.caption(f"上次自動發送: {last_log}")
 else:
-    st.sidebar.caption("今日未自動發送 (17:00 HKT)")
+    st.sidebar.caption("今日未自動發送 (17:00 HKT, 由 app.py 負責)")
 if st.sidebar.button("登出",key="v469_logout"):
     st.session_state.user=None
     st.cache_data.clear()
@@ -595,11 +589,12 @@ if st.sidebar.button("🔍 測試WhatsApp Group",key="v469_test_wa"):
         st.sidebar.success(f"✅ 已發送: {info[:200]}")
     else:
         st.sidebar.error(f"❌ 失敗: {info[:300]}")
-if st.sidebar.button("📦 測試每日Excel",key="v469_test_daily_excel"):
+# FIX B: 呢個掣保留返俾你手動撳, 手動先會 Send, 唔會自動 Send
+if st.sidebar.button("📦 測試每日Excel (手動, 唔會自動 Send)",key="v469_test_daily_excel"):
     with st.spinner("生成緊..."):
         ok, info = generate_and_send_daily_excel()
         if ok:
-            st.sidebar.success(f"✅ {info}")
+            st.sidebar.success(f"✅ {info} (手動)")
             write_daily_log(f"MANUAL OK {info[:100]}")
         else:
             st.sidebar.warning(f"失敗 {info}")
@@ -987,7 +982,6 @@ if role in ["admin","op"]:
     with tabs[-1]:
         st.subheader("📦 通行 SCAN - 橫表")
         st.caption("通行 = 錢 · 運輸總表 = 箱數 · 兩頁同一組箱數計出嚟")
-        # FIX: 入去呢頁嗰陣, 即刻去 Sheet 拎最新箱數, 唔好再淨係睇 Hardcode
         try:
             load_scan_boxes_from_sheet()
         except Exception as e:
@@ -999,7 +993,9 @@ if role in ["admin","op"]:
             st.metric("日數", f"{len(SCAN_BOXES)} 日")
         with c3:
             st.metric("有數日期", ", ".join(sorted(SCAN_BOXES.keys())[-3:]))
-        if st.button("🔄 一鍵寫入兩頁去 Google Sheet (通行 + 運輸總表)", type="primary", key="tongxing_rebuild"):
+        # FIX C: 一鍵寫入會用 Hardcode 舊數蓋晒 Sheet, 加返警告, 唔好亂撳
+        st.warning("⚠️ 注意：下面呢個掣會用上面 Hardcode 嗰啲舊數去 Clear 晒成個 通行 + 運輸總表 再寫返入去，會蓋咗 app.py 22:00 寫入去嗰啲新數。唔係好需要就唔好撳。")
+        if st.button("🔄 一鍵寫入兩頁去 Google Sheet (通行 + 運輸總表) - 小心會蓋咗新數", type="primary", key="tongxing_rebuild"):
             msg = rebuild_tongxing_sheet()
             st.success(f"已寫入：{msg}")
         st.markdown("**通行 - 錢**")
