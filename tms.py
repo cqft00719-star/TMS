@@ -42,14 +42,12 @@ try:
 except:
     pass
 
-st.set_page_config(page_title="TMS V47.0 Fixed", layout="wide", page_icon="🚚")
+st.set_page_config(page_title="TMS V47.1 Fixed Pool", layout="wide", page_icon="🚚")
 
-# ===== FIX: 唔再 Hardcode 舊數，全部由 Sheet 讀 =====
 NEW_FEES = ["隧道費","登記費","停車費","交倉附加費","其他"]
 SCAN_SHOPS = ["TSTN","TSTG","TST","MK","MPMK","MOKO","CENT","HSP","CPE","CWB","CYW","AT1","AT2","ATRA","APM","KLN","TM","SH"]
 SCAN_MIN_CHARGE = [200,200,200,200,200,200,380,380,380,380,380,500,500,500,200,200,250,250]
 SCAN_PER_BOX = 5
-# 舊版呢度有成堆 2026-11-01 到 11-15 嘅 Hardcode，已全部刪除，改做由 Sheet 讀
 SCAN_BOXES = {}
 
 def scan_cost_for(shop, boxes):
@@ -63,7 +61,6 @@ def scan_cost_for(shop, boxes):
 
 def build_tongxing_matrix():
     rows = []
-    # FIX: 格式統一返做 app.py 格式，第一行就係 Header，唔再係收費行
     rows.append(["Date"] + SCAN_SHOPS + ["總數"])
     for d in range(1, 32):
         ds = f"2026-11-{d:02d}"
@@ -116,7 +113,6 @@ def load_scan_boxes_from_sheet():
             if not row or not row[0].strip():
                 continue
             try:
-                # 支援 15-Nov 同 2026-11-15 兩種格式
                 raw = row[0].strip()
                 if "-Nov" in raw:
                     day = int(raw.split("-")[0])
@@ -138,8 +134,6 @@ def load_scan_boxes_from_sheet():
         print(f"load from sheet fail: {e}")
 
 def rebuild_tongxing_sheet():
-    # FIX: 呢個 function 已經停用，唔會再 clear + 蓋數
-    # 舊版會用 Hardcode 舊數清晒 Sheet，係元兇
     return "已停用：為咗唔蓋咗 app.py 22:00 寫入嘅新數，呢個一鍵寫入已經停用。請直接喺 Google Sheet 睇，唔好喺呢度寫入。"
 
 def build_tongxing_excel_bytes():
@@ -333,7 +327,6 @@ def write_daily_log(status):
         print(f"DailyLog write fail {e}")
 
 def check_and_auto_send_daily():
-    # FIX: 17:00 自動 Send 已經停用，改由 app.py 負責，呢度唔好再自動 Send，否則會 Send 兩次 / 時間錯
     return
 
 def set_job_delivered(jid):
@@ -490,7 +483,6 @@ def ensure_sheets():
     add("Expenses",["ExpenseID","Date","JobID","Driver","Type","Amount","Remark","CreatedAt_HKT"])
     add("OrderCosts",["InternalNo","JobID","Date","Client","Zone","From","From_Contact","From_Phone","PickupTime","To","To_Contact","To_Phone","DeliveryTime","CargoDetail","Status","Driver","隧道費","登記費","停車費","交倉附加費","其他","TotalExpense","LastSync_HKT"])
     add("DailyLog",["Date","Time_HKT","Status","Detail","TriggeredBy"])
-    # FIX: 通行 / 運輸總表 Header 統一做 app.py 格式
     add("通行",["Date"]+SCAN_SHOPS+["總數"])
     add("運輸總表",["Date"]+SCAN_SHOPS+["總箱數"])
 
@@ -506,7 +498,20 @@ def format_job_option(row):
     jid=str(row.get("JobID","")); client=str(row.get("Client",""))[:15]; internal=str(row.get("InternalNo","")); date=str(row.get("Date",""))[:10]; delivery=str(row.get("DeliveryTime",""))
     return f"{jid} | {client} | {internal} | {date} {delivery}".strip()
 
-# FIX: ?auto_daily=1 只留俾手動撳，唔會自動 Send
+# ===== FIX 任務池：唔再 head(20) 截斷 + 加 strip + 加搜尋 =====
+def get_pool_jobs(df):
+    if df.empty:
+        return df
+    if "Driver" not in df.columns or "Status" not in df.columns:
+        return df.iloc[0:0]
+    drv = df["Driver"].astype(str).str.strip().str.lower()
+    stt = df["Status"].astype(str).str.strip().str.upper()
+    # Driver 空白 + Status 係 Pending / 空白 / Nan，先係可接
+    # 加 strip 係為咗食返 "Pending " 後面有空格嗰啲
+    mask = (drv == "") | (drv == "nan") | (drv == "none")
+    mask = mask & stt.isin(["PENDING", "", "NAN", "NONE"])
+    return df[mask].copy()
+
 if st.query_params.get("auto_daily") == "1":
     ok, info = generate_and_send_daily_excel()
     write_daily_log(f"MANUAL auto_daily=1 {'OK' if ok else 'FAIL'} {info[:120]}")
@@ -516,7 +521,7 @@ if st.query_params.get("auto_daily") == "1":
 if "user" not in st.session_state:
     st.session_state.user=None
 if not st.session_state.user:
-    st.title("TMS V47.0 登入 - Fixed")
+    st.title("TMS V47.1 登入 - Fixed Pool")
     df_u=load_df("Users")
     u=st.text_input("用戶名")
     p=st.text_input("密碼",type="password")
@@ -529,13 +534,12 @@ if not st.session_state.user:
             st.error("帳號錯")
     st.stop()
 ensure_sheets()
-# FIX: 唔好再自動跑 check_and_auto_send_daily()
 user=st.session_state.user
 role=str(user.get("role","driver")).lower()
 operator=user.get("username","")
 op_name=user.get("name","")
 st.sidebar.title(f"👤 {op_name} ({role})")
-st.sidebar.write(f"🔥 **V47.0 Fixed**")
+st.sidebar.write(f"🔥 **V47.1 Fixed Pool**")
 last_log = get_last_daily_log()
 if last_log:
     st.sidebar.caption(f"上次自動發送: {last_log}")
@@ -549,7 +553,7 @@ if st.sidebar.button("🔄 同步OrderCosts",key="v47_sync"):
     cnt=sync_order_costs_sheet()
     st.sidebar.success(f"已同步 {cnt} 單")
 if st.sidebar.button("🔍 測試WhatsApp Group",key="v47_test_wa"):
-    test_msg = f"[V47.0測試]{now_hk().strftime('%m/%d %H:%M')} by {operator}"
+    test_msg = f"[V47.1測試]{now_hk().strftime('%m/%d %H:%M')} by {operator}"
     ok, info = send_whatsapp_to_ops(test_msg)
     if ok: st.sidebar.success(f"✅ 已發送: {info[:200]}")
     else: st.sidebar.error(f"❌ 失敗: {info[:300]}")
@@ -595,14 +599,28 @@ def get_my_history_jobs(df):
 with tabs[0]:
     if role=="driver":
         st.subheader("🟢 可接任務池")
-        df_pool=df_jobs[(df_jobs["Driver"].astype(str).str.strip()=="") & (df_jobs["Status"].astype(str).str.upper().isin(["PENDING",""]))] if not df_jobs.empty else pd.DataFrame()
+        # ===== FIX: 唔再 head(20)，全部出晒 + 搜尋 =====
+        df_pool = get_pool_jobs(df_jobs)
+        st.caption(f"而家有 {len(df_pool)} 張可接單 (Driver 空白 + Status Pending)。如果見唔到某張，請用下面搜尋打客戶名 / JobID。")
         if df_pool.empty:
             st.info("暫無可接")
         else:
-            for idx,row in df_pool.sort_values(by="JobID",ascending=False).head(20).iterrows():
+            pool_search = st.text_input("🔍 搜尋可接單 (打 Gucci / JobID / 地址)", placeholder="例如：Gucci、JOB-1104、Times Square...", key="v47_pool_search")
+            df_pool_show = df_pool.copy()
+            if pool_search.strip():
+                s = pool_search.strip().lower()
+                mask = df_pool_show.apply(lambda r: s in str(r.get("JobID","")).lower() or s in str(r.get("Client","")).lower() or s in str(r.get("To","")).lower() or s in str(r.get("InternalNo","")).lower() or s in str(r.get("From","")).lower(), axis=1)
+                df_pool_show = df_pool_show[mask]
+                if df_pool_show.empty:
+                    st.warning(f"搵唔到包含「{pool_search}」嘅可接單。呢張單可能已經俾人搶咗 (Driver 已填)，或者 Status 唔係 Pending，請去 Sheet 睇 N / O 欄。")
+                else:
+                    st.success(f"搵到 {len(df_pool_show)} 張")
+            # 唔再 head(20)，全部顯示，唔會再俾人截咗嗰 2 張 Gucci
+            for idx,row in df_pool_show.sort_values(by="JobID",ascending=False).iterrows():
                 jid=row.get("JobID","")
                 with st.container(border=True):
                     st.markdown(f"**{jid}** | {row.get('Client','')} | {row.get('Date','')} {row.get('DeliveryTime','')}")
+                    st.caption(f"{row.get('From','')} -> {row.get('To','')} | Internal: {row.get('InternalNo','')}")
                     if st.button("🟢 搶此單",key=f"v47_claim_{jid}_{idx}",type="primary"):
                         ws=get_sh().worksheet("Jobs")
                         headers=[h.strip() for h in ws.row_values(1)]
@@ -615,7 +633,7 @@ with tabs[0]:
                             st.success(f"已搶 {jid}，已通知WhatsApp")
                             st.rerun()
     else:
-        st.markdown("### 🚚 LogiTrack HK | Pro Dashboard V47.0")
+        st.markdown("### 🚚 LogiTrack HK | Pro Dashboard V47.1")
         st.caption(f"Updated just now • Last sync: {now_hk().strftime('%H:%M HKT')} • Data as of {today_hk()} | ✅ 即時WhatsApp已啟用")
         if df_jobs.empty:
             st.info("暫無Jobs數據")
@@ -873,7 +891,7 @@ if cost_idx is not None:
         if not df_cost.empty:
             st.dataframe(df_cost.sort_values(by="JobID",ascending=False), use_container_width=True, height=450)
     with tabs[6]:
-        st.subheader("📥 下載POD - V47.0 FIXED")
+        st.subheader("📥 下載POD - V47.1 FIXED")
         df_pods = load_df("PODs")
         if df_pods.empty:
             st.warning("無PODs")
@@ -949,7 +967,6 @@ if role in ["admin","op"]:
             st.metric("日數", f"{len(SCAN_BOXES)} 日")
         with c3:
             st.metric("有數日期", ", ".join(sorted(SCAN_BOXES.keys())[-3:]))
-        # FIX: 舊版一鍵寫入已停用，唔會再 Clear + 蓋數
         st.error("⛔ 注意：舊版嗰個「一鍵寫入兩頁」已經停用，唔會再清 Sheet。app.py 22:00 寫入嘅新數唔會再俾人蓋咗。想睇最新數，直接去 Google Sheet 睇「通行」+「運輸總表」。")
         if st.button("⚠️ 顯示點解停用 (唔會寫入)", key="tongxing_rebuild_disabled"):
             msg = rebuild_tongxing_sheet()
