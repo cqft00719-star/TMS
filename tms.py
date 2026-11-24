@@ -42,7 +42,7 @@ try:
 except:
     pass
 
-st.set_page_config(page_title="TMS V47.1 Fixed Pool", layout="wide", page_icon="🚚")
+st.set_page_config(page_title="TMS V47.2 Manual Cookie", layout="wide", page_icon="🚚")
 
 NEW_FEES = ["隧道費","登記費","停車費","交倉附加費","其他"]
 SCAN_SHOPS = ["TSTN","TSTG","TST","MK","MPMK","MOKO","CENT","HSP","CPE","CWB","CYW","AT1","AT2","ATRA","APM","KLN","TM","SH"]
@@ -135,6 +135,65 @@ def load_scan_boxes_from_sheet():
 
 def rebuild_tongxing_sheet():
     return "已停用：為咗唔蓋咗 app.py 22:00 寫入嘅新數，呢個一鍵寫入已經停用。請直接喺 Google Sheet 睇，唔好喺呢度寫入。"
+
+# ===== 新：手動入曲奇數，取代 OCR，寫入兩頁 =====
+def write_cookie_manual(manual_date, boxes_dict):
+    # manual_date: date object, boxes_dict: {TSTN:15, ...}
+    try:
+        sh = get_sh()
+        # 日期格式要同 app.py 一樣：23-Nov
+        sd = manual_date.strftime("%d-%b")
+        total_boxes = sum(boxes_dict.values())
+        fee_total = 0
+        for s, v in boxes_dict.items():
+            if v:
+                _, c = scan_cost_for(s, v)
+                fee_total += c
+        # 1. 運輸總表 = 箱數
+        for sheet_name, is_cost in [("運輸總表", False), ("通行", True)]:
+            ws = sh.worksheet(sheet_name)
+            vals = ws.get_all_values()
+            # Header 檢查，如果係舊格式就還原
+            expected = ["Date"] + SCAN_SHOPS + ["總箱數"]
+            if not vals or vals[0][0].strip() == "" or "200" in str(vals[0]):
+                ws.update('A1', [expected], value_input_option='USER_ENTERED')
+                vals = ws.get_all_values()
+            ri = None
+            for i, r in enumerate(vals[1:], start=2):
+                if r and r[0].strip() == sd:
+                    ri = i
+                    break
+            if not ri:
+                ri = len(vals) + 1
+                ws.update_cell(ri, 1, sd)
+            if is_cost:
+                rv = []
+                for s in SCAN_SHOPS:
+                    v = boxes_dict.get(s, 0)
+                    if v == 0:
+                        rv.append("")
+                    else:
+                        _, c = scan_cost_for(s, v)
+                        rv.append(c)
+                ws.update(f"B{ri}:S{ri}", [rv])
+                ws.update_cell(ri, 20, fee_total)
+            else:
+                rv = [boxes_dict.get(s, 0) if boxes_dict.get(s, 0) != 0 else "" for s in SCAN_SHOPS]
+                ws.update(f"B{ri}:S{ri}", [rv])
+                ws.update_cell(ri, 20, total_boxes)
+            # 黃色 highlight，代表手動入，唔係 OCR 估
+            try:
+                for c_idx, s in enumerate(SCAN_SHOPS, start=2):
+                    if boxes_dict.get(s, 0) > 0:
+                        col = chr(64 + c_idx) if c_idx <= 26 else "A" + chr(64 + c_idx - 26)
+                        ws.format(f"{col}{ri}", {"backgroundColor": {"red": 1, "green": 1, "blue": 0}})
+                ws.format(f"T{ri}", {"backgroundColor": {"red": 1, "green": 1, "blue": 0}})
+            except:
+                pass
+        st.cache_data.clear()
+        return True, total_boxes, fee_total, sd
+    except Exception as e:
+        return False, 0, 0, str(e)
 
 def build_tongxing_excel_bytes():
     from openpyxl import Workbook
@@ -498,7 +557,6 @@ def format_job_option(row):
     jid=str(row.get("JobID","")); client=str(row.get("Client",""))[:15]; internal=str(row.get("InternalNo","")); date=str(row.get("Date",""))[:10]; delivery=str(row.get("DeliveryTime",""))
     return f"{jid} | {client} | {internal} | {date} {delivery}".strip()
 
-# ===== FIX 任務池：唔再 head(20) 截斷 + 加 strip + 加搜尋 =====
 def get_pool_jobs(df):
     if df.empty:
         return df
@@ -506,8 +564,6 @@ def get_pool_jobs(df):
         return df.iloc[0:0]
     drv = df["Driver"].astype(str).str.strip().str.lower()
     stt = df["Status"].astype(str).str.strip().str.upper()
-    # Driver 空白 + Status 係 Pending / 空白 / Nan，先係可接
-    # 加 strip 係為咗食返 "Pending " 後面有空格嗰啲
     mask = (drv == "") | (drv == "nan") | (drv == "none")
     mask = mask & stt.isin(["PENDING", "", "NAN", "NONE"])
     return df[mask].copy()
@@ -521,7 +577,7 @@ if st.query_params.get("auto_daily") == "1":
 if "user" not in st.session_state:
     st.session_state.user=None
 if not st.session_state.user:
-    st.title("TMS V47.1 登入 - Fixed Pool")
+    st.title("TMS V47.2 登入 - Manual Cookie")
     df_u=load_df("Users")
     u=st.text_input("用戶名")
     p=st.text_input("密碼",type="password")
@@ -539,7 +595,8 @@ role=str(user.get("role","driver")).lower()
 operator=user.get("username","")
 op_name=user.get("name","")
 st.sidebar.title(f"👤 {op_name} ({role})")
-st.sidebar.write(f"🔥 **V47.1 Fixed Pool**")
+st.sidebar.write(f"🔥 **V47.2 Manual Cookie**")
+st.sidebar.caption("OCR 已停用，曲奇改做手動入數")
 last_log = get_last_daily_log()
 if last_log:
     st.sidebar.caption(f"上次自動發送: {last_log}")
@@ -553,7 +610,7 @@ if st.sidebar.button("🔄 同步OrderCosts",key="v47_sync"):
     cnt=sync_order_costs_sheet()
     st.sidebar.success(f"已同步 {cnt} 單")
 if st.sidebar.button("🔍 測試WhatsApp Group",key="v47_test_wa"):
-    test_msg = f"[V47.1測試]{now_hk().strftime('%m/%d %H:%M')} by {operator}"
+    test_msg = f"[V47.2測試]{now_hk().strftime('%m/%d %H:%M')} by {operator}"
     ok, info = send_whatsapp_to_ops(test_msg)
     if ok: st.sidebar.success(f"✅ 已發送: {info[:200]}")
     else: st.sidebar.error(f"❌ 失敗: {info[:300]}")
@@ -599,7 +656,6 @@ def get_my_history_jobs(df):
 with tabs[0]:
     if role=="driver":
         st.subheader("🟢 可接任務池")
-        # ===== FIX: 唔再 head(20)，全部出晒 + 搜尋 =====
         df_pool = get_pool_jobs(df_jobs)
         st.caption(f"而家有 {len(df_pool)} 張可接單 (Driver 空白 + Status Pending)。如果見唔到某張，請用下面搜尋打客戶名 / JobID。")
         if df_pool.empty:
@@ -615,7 +671,6 @@ with tabs[0]:
                     st.warning(f"搵唔到包含「{pool_search}」嘅可接單。呢張單可能已經俾人搶咗 (Driver 已填)，或者 Status 唔係 Pending，請去 Sheet 睇 N / O 欄。")
                 else:
                     st.success(f"搵到 {len(df_pool_show)} 張")
-            # 唔再 head(20)，全部顯示，唔會再俾人截咗嗰 2 張 Gucci
             for idx,row in df_pool_show.sort_values(by="JobID",ascending=False).iterrows():
                 jid=row.get("JobID","")
                 with st.container(border=True):
@@ -633,7 +688,7 @@ with tabs[0]:
                             st.success(f"已搶 {jid}，已通知WhatsApp")
                             st.rerun()
     else:
-        st.markdown("### 🚚 LogiTrack HK | Pro Dashboard V47.1")
+        st.markdown("### 🚚 LogiTrack HK | Pro Dashboard V47.2")
         st.caption(f"Updated just now • Last sync: {now_hk().strftime('%H:%M HKT')} • Data as of {today_hk()} | ✅ 即時WhatsApp已啟用")
         if df_jobs.empty:
             st.info("暫無Jobs數據")
@@ -891,7 +946,7 @@ if cost_idx is not None:
         if not df_cost.empty:
             st.dataframe(df_cost.sort_values(by="JobID",ascending=False), use_container_width=True, height=450)
     with tabs[6]:
-        st.subheader("📥 下載POD - V47.1 FIXED")
+        st.subheader("📥 下載POD - V47.2")
         df_pods = load_df("PODs")
         if df_pods.empty:
             st.warning("無PODs")
@@ -955,11 +1010,41 @@ if cost_idx is not None:
 if role in ["admin","op"]:
     with tabs[-1]:
         st.subheader("📦 通行 SCAN - 橫表")
-        st.caption("通行 = 錢 · 運輸總表 = 箱數 · 兩頁同一組箱數計出嚟 · 數據由 Google Sheet 讀返嚟，唔會再用 Hardcode 舊數")
+        st.caption("通行 = 錢 · 運輸總表 = 箱數 · OCR 已停用，改做下面手動入數")
         try:
             load_scan_boxes_from_sheet()
         except Exception as e:
             print(f"tongxing load fail {e}")
+        # ===== ✍️ 手動入曲奇數，取代 OCR =====
+        st.markdown("### ✍️ 手動入曲奇數 (取代 OCR)")
+        st.caption("睇住張 SGL 相，逐間打箱數，冇貨就留 0。撳掣會直接寫入 運輸總表 + 通行，唔經 OCR，唔會再估錯。入錯咗可以再入多次，會覆蓋返同一日嗰行。")
+        with st.form("manual_cookie_form_v472", clear_on_submit=False):
+            manual_date = st.date_input("📅 送貨日期", value=today_hk() - datetime.timedelta(days=1), key="manual_cookie_date")
+            # 預設載入嗰日已有嘅數，等你唔使由頭打過
+            ds_key = manual_date.strftime("%Y-%m-%d")
+            existing_boxes = SCAN_BOXES.get(ds_key, {})
+            if existing_boxes:
+                st.info(f"呢日 {manual_date} 已經有數，上面會預設載入返，你改完再撳寫入就會覆蓋。")
+            cols_m = st.columns(6)
+            manual_boxes = {}
+            for i, shop in enumerate(SCAN_SHOPS):
+                with cols_m[i % 6]:
+                    manual_boxes[shop] = st.number_input(shop, min_value=0, max_value=100, value=int(existing_boxes.get(shop, 0)), key=f"manual_v472_{shop}")
+            manual_total_preview = sum(manual_boxes.values())
+            manual_fee_preview = sum(scan_cost_for(s, v)[1] for s, v in manual_boxes.items() if v)
+            st.info(f"預覽：總箱數 {manual_total_preview} 箱 | 通行 ${manual_fee_preview}")
+            if st.form_submit_button("✅ 寫入 運輸總表 + 通行", type="primary", use_container_width=True):
+                if manual_total_preview == 0:
+                    st.warning("總箱數係 0，係咪未打數？如果你真係想清晒呢日嘅數，請確認一次。")
+                else:
+                    ok_m, tot_m, fee_m, sd_m = write_cookie_manual(manual_date, manual_boxes)
+                    if ok_m:
+                        st.success(f"🎉 已寫入 {sd_m}：總箱數 {tot_m} 箱，通行 ${fee_m}，已寫入 運輸總表 + 通行")
+                        st.cache_data.clear()
+                        st.rerun()
+                    else:
+                        st.error(f"寫入失敗：{sd_m}")
+        st.divider()
         c1, c2, c3 = st.columns(3)
         with c1:
             st.metric("合計箱數", f"{sum(sum(v.values()) for v in SCAN_BOXES.values())} 箱")
@@ -967,7 +1052,7 @@ if role in ["admin","op"]:
             st.metric("日數", f"{len(SCAN_BOXES)} 日")
         with c3:
             st.metric("有數日期", ", ".join(sorted(SCAN_BOXES.keys())[-3:]))
-        st.error("⛔ 注意：舊版嗰個「一鍵寫入兩頁」已經停用，唔會再清 Sheet。app.py 22:00 寫入嘅新數唔會再俾人蓋咗。想睇最新數，直接去 Google Sheet 睇「通行」+「運輸總表」。")
+        st.error("⛔ 注意：舊版嗰個「一鍵寫入兩頁」已經停用，唔會再清 Sheet。想寫數請用上面「手動入曲奇數」。")
         if st.button("⚠️ 顯示點解停用 (唔會寫入)", key="tongxing_rebuild_disabled"):
             msg = rebuild_tongxing_sheet()
             st.warning(msg)
@@ -977,7 +1062,7 @@ if role in ["admin","op"]:
             df_show = pd.DataFrame(matrix[1:], columns=["日期"]+SCAN_SHOPS+["日總"])
             st.dataframe(df_show, use_container_width=True, height=300)
         else:
-            st.info("暫無通行數據，請等 app.py 22:00 寫入，或者去 Sheet 睇")
+            st.info("暫無通行數據，請用上面手動入數，或者去 Sheet 睇")
         st.markdown("**運輸總表 - 箱數**")
         matrix2 = build_zongbiao_matrix()
         if len(matrix2) > 1:
