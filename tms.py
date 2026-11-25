@@ -222,10 +222,12 @@ def build_tongxing_excel_bytes():
     buf = io.BytesIO(); wb.save(buf); buf.seek(0)
     return buf.getvalue()
 
+# ===== V48: 用 Evolution API send，唔係 Ultramsg，Ultramsg 過期都唔影響 =====
+# VIP Group = 運輸（VIP單）Group by 2CM = 120363413020795341@g.us
 EVO_BASE_URL = "https://evolution-api-production-5d91de27.up.railway.app"
 EVO_INSTANCE = "my WhatsApps"
 EVO_API_KEY = st.secrets["EVO_API_KEY"]
-ULTRAMSG_GROUP_ID = "120363410834827562@g.us"
+ULTRAMSG_GROUP_ID = "120363413020795341@g.us"
 MY_WHATSAPP = st.secrets.get("MY_WHATSAPP", "")
 DAILY_AUTO_HOUR = 17
 DAILY_AUTO_MINUTE = 0
@@ -593,7 +595,6 @@ def ensure_sheets():
     add("通行",["Date"]+SCAN_SHOPS+["總數"])
     add("運輸總表",["Date"]+SCAN_SHOPS+["總箱數"])
 
-# ===== V48 FIX: QR 唔再用 absolute，改做左右排，唔遮資料 =====
 def printable_order_html(job):
     jid = job.get('JobID',''); internal = job.get('InternalNo',''); client = job.get('Client',''); zone = job.get('Zone','')
     from_addr = job.get('From',''); from_contact = job.get('From_Contact',''); from_phone = job.get('From_Phone',''); pickup = job.get('PickupTime','')
