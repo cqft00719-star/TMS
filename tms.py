@@ -42,7 +42,7 @@ try:
 except:
     pass
 
-st.set_page_config(page_title="TMS V47.2 Manual Cookie", layout="wide", page_icon="🚚")
+st.set_page_config(page_title="TMS V48 Edit + QR", layout="wide", page_icon="🚚")
 
 NEW_FEES = ["隧道費","登記費","停車費","交倉附加費","其他"]
 SCAN_SHOPS = ["TSTN","TSTG","TST","MK","MPMK","MOKO","CENT","HSP","CPE","CWB","CYW","AT1","AT2","ATRA","APM","KLN","TM","SH"]
@@ -136,12 +136,9 @@ def load_scan_boxes_from_sheet():
 def rebuild_tongxing_sheet():
     return "已停用：為咗唔蓋咗 app.py 22:00 寫入嘅新數，呢個一鍵寫入已經停用。請直接喺 Google Sheet 睇，唔好喺呢度寫入。"
 
-# ===== 新：手動入曲奇數，取代 OCR，寫入兩頁 =====
 def write_cookie_manual(manual_date, boxes_dict):
-    # manual_date: date object, boxes_dict: {TSTN:15, ...}
     try:
         sh = get_sh()
-        # 日期格式要同 app.py 一樣：23-Nov
         sd = manual_date.strftime("%d-%b")
         total_boxes = sum(boxes_dict.values())
         fee_total = 0
@@ -149,11 +146,9 @@ def write_cookie_manual(manual_date, boxes_dict):
             if v:
                 _, c = scan_cost_for(s, v)
                 fee_total += c
-        # 1. 運輸總表 = 箱數
         for sheet_name, is_cost in [("運輸總表", False), ("通行", True)]:
             ws = sh.worksheet(sheet_name)
             vals = ws.get_all_values()
-            # Header 檢查，如果係舊格式就還原
             expected = ["Date"] + SCAN_SHOPS + ["總箱數"]
             if not vals or vals[0][0].strip() == "" or "200" in str(vals[0]):
                 ws.update('A1', [expected], value_input_option='USER_ENTERED')
@@ -181,7 +176,6 @@ def write_cookie_manual(manual_date, boxes_dict):
                 rv = [boxes_dict.get(s, 0) if boxes_dict.get(s, 0) != 0 else "" for s in SCAN_SHOPS]
                 ws.update(f"B{ri}:S{ri}", [rv])
                 ws.update_cell(ri, 20, total_boxes)
-            # 黃色 highlight，代表手動入，唔係 OCR 估
             try:
                 for c_idx, s in enumerate(SCAN_SHOPS, start=2):
                     if boxes_dict.get(s, 0) > 0:
@@ -228,13 +222,33 @@ def build_tongxing_excel_bytes():
     buf = io.BytesIO(); wb.save(buf); buf.seek(0)
     return buf.getvalue()
 
+# ===== V48: Group ID 已改做真 VIP Group =====
 EVO_BASE_URL = "https://evolution-api-production-5d91de27.up.railway.app"
 EVO_INSTANCE = "my WhatsApps"
 EVO_API_KEY = st.secrets["EVO_API_KEY"]
-ULTRAMSG_GROUP_ID = "120363413020795341@g.us"
+ULTRAMSG_GROUP_ID = "120363410834827562@g.us"
 MY_WHATSAPP = st.secrets.get("MY_WHATSAPP", "")
 DAILY_AUTO_HOUR = 17
 DAILY_AUTO_MINUTE = 0
+# QR 用：Streamlit Secrets 加 APP_URL = "https://你個-tms-網址"
+APP_URL = ""
+try:
+    APP_URL = str(st.secrets.get("APP_URL", "")).strip()
+except:
+    APP_URL = ""
+
+def get_qr_url_for_job(jid):
+    # 如果有 APP_URL，QR Scan 會直接開 Apps 嗰張單；如果冇，就淨係編 JobID，司機 Scan 到都知係邊張單
+    if APP_URL:
+        base = APP_URL.rstrip("/")
+        return f"{base}/?job={quote(str(jid).strip())}"
+    return str(jid).strip()
+
+def make_qr_img_tag(jid, size=110):
+    # 唔依賴 qrcode library，用 qrserver 畫，Streamlit 唔使另外裝嘢
+    data = quote(get_qr_url_for_job(jid))
+    url = f"https://api.qrserver.com/v1/create-qr-code/?size={size}x{size}&data={data}"
+    return url
 
 def send_ultramsg_message(to, body):
     try:
@@ -320,6 +334,15 @@ def notify_expense(jid, driver, client, fee_dict, total):
     except Exception as e:
         st.error(f"WhatsApp 通知失敗: {e}")
 
+# ===== V48: 修改 Order 通知 =====
+def notify_order_edited(jid, client, operator_name, changed_fields):
+    try:
+        ch = "、".join(changed_fields) if changed_fields else "內容"
+        ok, info = send_whatsapp_to_ops(f"✏️ Order 已修改 {jid} | {client} | 改咗: {ch} | 由 {operator_name} 改 | {now_hk().strftime('%H:%M HKT')}\n司機請睇最新地址 / 時間，唔好照舊單去。")
+        if not ok: st.error(f"WhatsApp 通知失敗: {info[:300]}")
+    except Exception as e:
+        st.error(f"WhatsApp 通知失敗: {e}")
+
 def parse_company_export_template(file):
     df = pd.read_excel(file, sheet_name=0, header=0, dtype=str).fillna("")
     df.columns = [str(c).strip() for c in df.columns]
@@ -387,6 +410,38 @@ def write_daily_log(status):
 
 def check_and_auto_send_daily():
     return
+
+# ===== V48: 修改 Order - 直接寫返去同一行 =====
+def update_job_in_sheet(jid, new_vals, old_row_dict):
+    try:
+        ws = get_sh().worksheet("Jobs")
+        headers = [h.strip() for h in ws.row_values(1)]
+        if "JobID" not in headers:
+            return False, "Jobs 冇 JobID 欄"
+        cell = ws.find(str(jid).strip())
+        if not cell:
+            return False, f"搵唔到 {jid}"
+        row_no = cell.row
+        changed = []
+        for col_name, new_v in new_vals.items():
+            if col_name not in headers:
+                continue
+            old_v = str(old_row_dict.get(col_name, ""))
+            if str(new_v) != old_v:
+                changed.append(col_name)
+                ws.update_cell(row_no, headers.index(col_name)+1, str(new_v))
+        # 喺 Notes 加返修改紀錄，等之後有得追
+        try:
+            if changed and "Notes" in headers:
+                old_notes = str(old_row_dict.get("Notes", "") or "")
+                add = f"[修改 {now_hk().strftime('%m/%d %H:%M')} by {st.session_state.get('user', {}).get('username','')}: 改咗 {','.join(changed)}]"
+                ws.update_cell(row_no, headers.index("Notes")+1, (old_notes + " " + add).strip())
+        except:
+            pass
+        st.cache_data.clear()
+        return True, changed
+    except Exception as e:
+        return False, str(e)
 
 def set_job_delivered(jid):
     try:
@@ -552,7 +607,8 @@ def printable_order_html(job):
     cargo = job.get('CargoDetail',''); notes = job.get('Notes','') or ""; date_str = job.get('Date','')
     expected = f"{date_str} {pickup}-{delivery}".strip() or delivery or pickup or date_str
     cargo_html = str(cargo).replace('\n','<br>') if cargo else ""
-    return f"""<html><head><meta charset="utf-8"><title>Printable - {jid}</title><style>@media print {{.no-print {{ display:none; }} @page {{ margin:10mm; }} }} body{{font-family: "Microsoft JhengHei", Arial, sans-serif; font-size:13px;}}.page{{border:2px solid #000; max-width:830px; margin:10px auto; padding:18px 22px;}} h1{{text-align:center; font-size:22px; margin:5px 0 8px 0;}}.subtitle{{text-align:center; font-size:12px; margin-bottom:12px; border-bottom:1px solid #999; padding-bottom:8px;}} table{{width:100%; border-collapse:collapse; margin:6px 0;}} td{{border:1px solid #000; padding:6px 8px;}}.label{{background:#f2f2f2; width:110px; font-weight:bold;}}.label2{{background:#f2f2f2; width:55px; font-weight:bold; text-align:center;}}.section{{font-size:15px; font-weight:bold; margin:14px 0 4px 0;}}.sign{{margin-top:18px; display:flex; justify-content:space-between; font-size:12px;}}.hint{{text-align:center; font-size:11px; color:#666; margin-top:10px;}}</style></head><body><div class="page"><h1>🚚 運輸訂單 Transport Order</h1><div class="subtitle">JobID: {jid} | Internal: {internal} | 預計: {expected}</div><table><tr><td class="label">客戶 Client</td><td>{client}</td><td class="label2">Zone</td><td style="width:130px;">{zone}</td></tr></table><div class="section">📦 起點 Pickup</div><table><tr><td class="label">地址 From</td><td colspan="3">{from_addr}</td></tr><tr><td class="label">聯絡人</td><td>{from_contact}</td><td class="label2">電話</td><td style="width:150px;">{from_phone}</td></tr><tr><td class="label">提貨時間</td><td colspan="3">{pickup}</td></tr></table><div class="section">🏁 終點 Delivery</div><table><tr><td class="label">地址 To</td><td colspan="3">{to_addr}</td></tr><tr><td class="label">聯絡人</td><td>{to_contact}</td><td class="label2">電話</td><td style="width:150px;">{to_phone}</td></tr><tr><td class="label">送貨時間</td><td colspan="3">{delivery}</td></tr></table><div class="section">📋 貨物資料 Cargo</div><table><tr><td class="label">詳細明細</td><td>{cargo_html}</td></tr><tr><td class="label">備註</td><td>{notes}</td></tr></table><div class="sign"><div>司機簽收: __________________</div><div>客戶簽收: __________________</div><div>日期: {date_str}</div></div></div><div class="hint no-print"><button onclick="window.print()" style="margin-top:10px; padding:10px 22px; font-size:15px;">🖨️ 打印 / Save as PDF</button></div></body></html>"""
+    qr_url = make_qr_img_tag(jid, size=120)
+    return f"""<html><head><meta charset="utf-8"><title>Printable - {jid}</title><style>@media print {{.no-print {{ display:none; }} @page {{ margin:10mm; }} }} body{{font-family: "Microsoft JhengHei", Arial, sans-serif; font-size:13px;}}.page{{border:2px solid #000; max-width:830px; margin:10px auto; padding:18px 22px; position:relative;}} h1{{text-align:center; font-size:22px; margin:5px 0 8px 0;}}.subtitle{{text-align:center; font-size:12px; margin-bottom:12px; border-bottom:1px solid #999; padding-bottom:8px;}} table{{width:100%; border-collapse:collapse; margin:6px 0;}} td{{border:1px solid #000; padding:6px 8px;}}.label{{background:#f2f2f2; width:110px; font-weight:bold;}}.label2{{background:#f2f2f2; width:55px; font-weight:bold; text-align:center;}}.section{{font-size:15px; font-weight:bold; margin:14px 0 4px 0;}}.sign{{margin-top:18px; display:flex; justify-content:space-between; font-size:12px;}}.hint{{text-align:center; font-size:11px; color:#666; margin-top:10px;}}.qr-box{{position:absolute; top:14px; right:18px; text-align:center;}}.qr-box img{{width:110px; height:110px; border:1px solid #000;}}.qr-box div{{font-size:10px; font-weight:bold; margin-top:2px;}}</style></head><body><div class="page"><div class="qr-box"><img src="{qr_url}"><div>Scan 入單 / POD<br>{jid}</div></div><h1>🚚 運輸訂單 Transport Order</h1><div class="subtitle">JobID: {jid} | Internal: {internal} | 預計: {expected}</div><table><tr><td class="label">客戶 Client</td><td>{client}</td><td class="label2">Zone</td><td style="width:130px;">{zone}</td></tr></table><div class="section">📦 起點 Pickup</div><table><tr><td class="label">地址 From</td><td colspan="3">{from_addr}</td></tr><tr><td class="label">聯絡人</td><td>{from_contact}</td><td class="label2">電話</td><td style="width:150px;">{from_phone}</td></tr><tr><td class="label">提貨時間</td><td colspan="3">{pickup}</td></tr></table><div class="section">🏁 終點 Delivery</div><table><tr><td class="label">地址 To</td><td colspan="3">{to_addr}</td></tr><tr><td class="label">聯絡人</td><td>{to_contact}</td><td class="label2">電話</td><td style="width:150px;">{to_phone}</td></tr><tr><td class="label">送貨時間</td><td colspan="3">{delivery}</td></tr></table><div class="section">📋 貨物資料 Cargo</div><table><tr><td class="label">詳細明細</td><td>{cargo_html}</td></tr><tr><td class="label">備註</td><td>{notes}</td></tr></table><div class="sign"><div>司機簽收: __________________</div><div>客戶簽收: __________________</div><div>日期: {date_str}</div></div></div><div class="hint no-print"><button onclick="window.print()" style="margin-top:10px; padding:10px 22px; font-size:15px;">🖨️ 打印 / Save as PDF</button></div></body></html>"""
 def format_job_option(row):
     jid=str(row.get("JobID","")); client=str(row.get("Client",""))[:15]; internal=str(row.get("InternalNo","")); date=str(row.get("Date",""))[:10]; delivery=str(row.get("DeliveryTime",""))
     return f"{jid} | {client} | {internal} | {date} {delivery}".strip()
@@ -577,11 +633,11 @@ if st.query_params.get("auto_daily") == "1":
 if "user" not in st.session_state:
     st.session_state.user=None
 if not st.session_state.user:
-    st.title("TMS V47.2 登入 - Manual Cookie")
+    st.title("TMS V48 登入 - Edit + QR")
     df_u=load_df("Users")
     u=st.text_input("用戶名")
     p=st.text_input("密碼",type="password")
-    if st.button("登入",type="primary",key="v47_login"):
+    if st.button("登入",type="primary",key="v48_login"):
         m=df_u[(df_u["username"].astype(str).str.strip()==u.strip()) & (df_u["password"].astype(str).str.strip()==p.strip())]
         if not m.empty:
             st.session_state.user=m.iloc[0].to_dict()
@@ -594,27 +650,47 @@ user=st.session_state.user
 role=str(user.get("role","driver")).lower()
 operator=user.get("username","")
 op_name=user.get("name","")
+# ===== V48: QR Scan 入嚟，記低個 JobID =====
+qr_job = ""
+try:
+    qr_job = str(st.query_params.get("job", "") or "").strip()
+    # 有啲 QR 會帶 TMS:JOB-xxx 或者成條 link，抽返個 JOB- 出嚟
+    if qr_job and "JOB-" in qr_job.upper():
+        import re as _re
+        _m = _re.search(r"JOB-[A-Z0-9\-]+", qr_job.upper())
+        if _m: qr_job = _m.group(0)
+except:
+    qr_job = ""
+if qr_job:
+    st.session_state["qr_job"] = qr_job
+qr_job = st.session_state.get("qr_job", "")
 st.sidebar.title(f"👤 {op_name} ({role})")
-st.sidebar.write(f"🔥 **V47.2 Manual Cookie**")
+st.sidebar.write(f"🔥 **V48 Edit + QR**")
 st.sidebar.caption("OCR 已停用，曲奇改做手動入數")
+if qr_job:
+    st.sidebar.success(f"📷 QR 已認到：{qr_job}")
+    if st.sidebar.button("❌ 清除 QR 單", key="v48_clear_qr"):
+        st.session_state["qr_job"] = ""
+        st.query_params.clear()
+        st.rerun()
 last_log = get_last_daily_log()
 if last_log:
     st.sidebar.caption(f"上次自動發送: {last_log}")
 else:
     st.sidebar.caption("今日未自動發送 (17:00 HKT, 由 app.py 負責)")
-if st.sidebar.button("登出",key="v47_logout"):
+if st.sidebar.button("登出",key="v48_logout"):
     st.session_state.user=None
     st.cache_data.clear()
     st.rerun()
-if st.sidebar.button("🔄 同步OrderCosts",key="v47_sync"):
+if st.sidebar.button("🔄 同步OrderCosts",key="v48_sync"):
     cnt=sync_order_costs_sheet()
     st.sidebar.success(f"已同步 {cnt} 單")
-if st.sidebar.button("🔍 測試WhatsApp Group",key="v47_test_wa"):
-    test_msg = f"[V47.2測試]{now_hk().strftime('%m/%d %H:%M')} by {operator}"
+if st.sidebar.button("🔍 測試WhatsApp Group",key="v48_test_wa"):
+    test_msg = f"[V48測試]{now_hk().strftime('%m/%d %H:%M')} by {operator}"
     ok, info = send_whatsapp_to_ops(test_msg)
     if ok: st.sidebar.success(f"✅ 已發送: {info[:200]}")
     else: st.sidebar.error(f"❌ 失敗: {info[:300]}")
-if st.sidebar.button("📦 測試每日Excel (手動, 唔會自動 Send)",key="v47_test_daily_excel"):
+if st.sidebar.button("📦 測試每日Excel (手動, 唔會自動 Send)",key="v48_test_daily_excel"):
     with st.spinner("生成緊..."):
         ok, info = generate_and_send_daily_excel()
         if ok:
@@ -656,12 +732,39 @@ def get_my_history_jobs(df):
 with tabs[0]:
     if role=="driver":
         st.subheader("🟢 可接任務池")
+        # QR 嚟嘅單，置頂 show
+        if qr_job and not df_jobs.empty:
+            qr_row = df_jobs[df_jobs["JobID"].astype(str).str.strip() == qr_job]
+            if not qr_row.empty:
+                r = qr_row.iloc[0]
+                st.success(f"📷 QR 認到 {qr_job}，已經幫你搵到喇，唔使再打字搵。")
+                with st.container(border=True):
+                    st.markdown(f"**{r.get('JobID','')}** | {r.get('Client','')} | {r.get('Date','')} {r.get('DeliveryTime','')} | Status: {r.get('Status','')} | Driver: {r.get('Driver','')}")
+                    st.caption(f"{r.get('From','')} -> {r.get('To','')} | Internal: {r.get('InternalNo','')}")
+                    st.write(f"📦 {str(r.get('CargoDetail',''))[:200]}")
+                    if str(r.get('Status','')).strip().upper() == "PENDING" and not str(r.get('Driver','')).strip():
+                        if st.button(f"🟢 搶呢張 QR 單 {qr_job}", key=f"v48_claim_qr_{qr_job}", type="primary"):
+                            ws=get_sh().worksheet("Jobs")
+                            headers=[h.strip() for h in ws.row_values(1)]
+                            cell=ws.find(qr_job)
+                            if cell:
+                                if "Driver" in headers: ws.update_cell(cell.row, headers.index("Driver")+1, operator)
+                                if "Status" in headers: ws.update_cell(cell.row, headers.index("Status")+1, "Accepted")
+                                st.cache_data.clear()
+                                notify_claim(qr_job, operator, r.get('Client',''))
+                                st.success(f"已搶 {qr_job}")
+                                st.rerun()
+                    else:
+                        st.info("呢張單已經有人接咗 / 唔係 Pending，請去「上傳POD」嗰頁，嗰度已經幫你揀好咗呢張單。")
+                st.divider()
+            else:
+                st.warning(f"QR 嗰張 {qr_job} 搵唔到，可能 JobID 打錯咗，請試下下面搜尋。")
         df_pool = get_pool_jobs(df_jobs)
         st.caption(f"而家有 {len(df_pool)} 張可接單 (Driver 空白 + Status Pending)。如果見唔到某張，請用下面搜尋打客戶名 / JobID。")
         if df_pool.empty:
             st.info("暫無可接")
         else:
-            pool_search = st.text_input("🔍 搜尋可接單 (打 Gucci / JobID / 地址)", placeholder="例如：Gucci、JOB-1104、Times Square...", key="v47_pool_search")
+            pool_search = st.text_input("🔍 搜尋可接單 (打 Gucci / JobID / 地址)", placeholder="例如：Gucci、JOB-1104、Times Square...", key="v48_pool_search")
             df_pool_show = df_pool.copy()
             if pool_search.strip():
                 s = pool_search.strip().lower()
@@ -676,7 +779,7 @@ with tabs[0]:
                 with st.container(border=True):
                     st.markdown(f"**{jid}** | {row.get('Client','')} | {row.get('Date','')} {row.get('DeliveryTime','')}")
                     st.caption(f"{row.get('From','')} -> {row.get('To','')} | Internal: {row.get('InternalNo','')}")
-                    if st.button("🟢 搶此單",key=f"v47_claim_{jid}_{idx}",type="primary"):
+                    if st.button("🟢 搶此單",key=f"v48_claim_{jid}_{idx}",type="primary"):
                         ws=get_sh().worksheet("Jobs")
                         headers=[h.strip() for h in ws.row_values(1)]
                         cell=ws.find(jid)
@@ -688,7 +791,7 @@ with tabs[0]:
                             st.success(f"已搶 {jid}，已通知WhatsApp")
                             st.rerun()
     else:
-        st.markdown("### 🚚 LogiTrack HK | Pro Dashboard V47.2")
+        st.markdown("### 🚚 LogiTrack HK | Pro Dashboard V48")
         st.caption(f"Updated just now • Last sync: {now_hk().strftime('%H:%M HKT')} • Data as of {today_hk()} | ✅ 即時WhatsApp已啟用")
         if df_jobs.empty:
             st.info("暫無Jobs數據")
@@ -743,25 +846,86 @@ with tabs[0]:
 
 if role in ["admin","op"]:
     with tabs[1]:
-        st.subheader("📋 任務管理 + 打印")
+        st.subheader("📋 任務管理 + 打印 + 修改")
+        st.caption("✏️ 修改：只有 admin / op 先改到。Delivered 咗嘅單唔俾改。改完會自動通知 VIP Group。")
+        if qr_job and not df_jobs.empty:
+            st.info(f"📷 QR 認到 {qr_job}，下面嗰張就係嗰張單。")
         if df_jobs.empty:
             st.info("無任務")
         else:
-            for idx,row in df_jobs.sort_values(by="JobID",ascending=False).head(100).iterrows():
+            # QR 嚟嘅單排最前
+            df_sorted = df_jobs.sort_values(by="JobID",ascending=False)
+            if qr_job:
+                df_sorted = pd.concat([df_sorted[df_sorted["JobID"].astype(str).str.strip()==qr_job], df_sorted[df_sorted["JobID"].astype(str).str.strip()!=qr_job]])
+            for idx,row in df_sorted.head(100).iterrows():
                 jid=row.get("JobID","")
                 with st.container(border=True):
-                    c1,c2 = st.columns([3,1])
+                    c1,c2,c3 = st.columns([3,1,1])
                     with c1:
                         st.markdown(f"**{jid}** | {row.get('Client','')} | {row.get('Status','')} | Driver:{row.get('Driver','')}")
                         st.caption(f"{row.get('From','')} -> {row.get('To','')} | 📅 {row.get('Date','')} {row.get('DeliveryTime','')}")
                     with c2:
-                        if st.button("🖨️ 打印", key=f"v47_print_{jid}_{idx}"):
+                        if st.button("🖨️ 打印", key=f"v48_print_{jid}_{idx}"):
                             st.session_state[f"print_{jid}"] = True
+                    with c3:
+                        if st.button("✏️ 修改", key=f"v48_edit_{jid}_{idx}"):
+                            st.session_state[f"edit_{jid}"] = True
                     if st.session_state.get(f"print_{jid}"):
                         st.components.v1.html(printable_order_html(row.to_dict()), height=750, scrolling=True)
+                    # ===== 修改 Form =====
+                    if st.session_state.get(f"edit_{jid}"):
+                        if str(row.get("Status","")).strip().upper() == "DELIVERED":
+                            st.warning(f"⚠️ {jid} 已經 Delivered，唔俾喺度改。如真係要改，請去 Google Sheet 直接改，或者開張新單。")
+                            if st.button("關閉修改", key=f"v48_edit_close_delivered_{jid}"):
+                                st.session_state[f"edit_{jid}"] = False
+                                st.rerun()
+                        else:
+                            st.markdown(f"**✏️ 修改 {jid}** - 改完撳儲存，會寫返去同一行，唔會開新單。")
+                            with st.form(f"v48_edit_form_{jid}"):
+                                ec1, ec2 = st.columns(2)
+                                with ec1:
+                                    e_client = st.text_input("客戶", value=str(row.get("Client","")), key=f"e_client_{jid}")
+                                    e_zone = st.text_input("Zone", value=str(row.get("Zone","")), key=f"e_zone_{jid}")
+                                    e_from = st.text_input("起點", value=str(row.get("From","")), key=f"e_from_{jid}")
+                                    e_from_contact = st.text_input("起點聯絡人", value=str(row.get("From_Contact","")), key=f"e_from_c_{jid}")
+                                    e_from_phone = st.text_input("起點電話", value=str(row.get("From_Phone","")), key=f"e_from_p_{jid}")
+                                    e_pickup = st.text_input("提貨時間", value=str(row.get("PickupTime","")), key=f"e_pickup_{jid}")
+                                with ec2:
+                                    e_internal = st.text_input("InternalNo", value=str(row.get("InternalNo","")), key=f"e_internal_{jid}")
+                                    e_date = st.text_input("日期 (YYYY-MM-DD)", value=str(row.get("Date","")), key=f"e_date_{jid}")
+                                    e_to = st.text_input("終點", value=str(row.get("To","")), key=f"e_to_{jid}")
+                                    e_to_contact = st.text_input("終點聯絡人", value=str(row.get("To_Contact","")), key=f"e_to_c_{jid}")
+                                    e_to_phone = st.text_input("終點電話", value=str(row.get("To_Phone","")), key=f"e_to_p_{jid}")
+                                    e_delivery = st.text_input("送貨時間", value=str(row.get("DeliveryTime","")), key=f"e_delivery_{jid}")
+                                e_cargo = st.text_area("貨物詳情", value=str(row.get("CargoDetail","")), height=100, key=f"e_cargo_{jid}")
+                                e_notes = st.text_input("備註", value=str(row.get("Notes","")), key=f"e_notes_{jid}")
+                                e_driver = st.text_input("司機 (留空 = 未派)", value=str(row.get("Driver","")), key=f"e_driver_{jid}")
+                                e_status = st.selectbox("狀態", ["Pending","Accepted","In Transit","Delivered","Cancelled"], index=["Pending","Accepted","In Transit","Delivered","Cancelled"].index(str(row.get("Status","Pending")).strip().title()) if str(row.get("Status","Pending")).strip().title() in ["Pending","Accepted","In Transit","Delivered","Cancelled"] else 0, key=f"e_status_{jid}")
+                                bc1, bc2 = st.columns(2)
+                                with bc1:
+                                    do_save = st.form_submit_button("✅ 儲存修改 + 通知 Group", type="primary", use_container_width=True)
+                                with bc2:
+                                    do_cancel = st.form_submit_button("取消", use_container_width=True)
+                                if do_cancel:
+                                    st.session_state[f"edit_{jid}"] = False
+                                    st.rerun()
+                                if do_save:
+                                    new_vals = {"Client": e_client, "Zone": e_zone, "From": e_from, "From_Contact": e_from_contact, "From_Phone": e_from_phone, "PickupTime": e_pickup, "InternalNo": e_internal, "Date": e_date, "To": e_to, "To_Contact": e_to_contact, "To_Phone": e_to_phone, "DeliveryTime": e_delivery, "CargoDetail": e_cargo, "Notes": e_notes, "Driver": e_driver, "Status": e_status}
+                                    ok_e, changed_e = update_job_in_sheet(jid, new_vals, row.to_dict())
+                                    if ok_e:
+                                        if changed_e:
+                                            notify_order_edited(jid, e_client, operator, changed_e)
+                                            st.success(f"🎉 已修改 {jid}，改咗：{','.join(changed_e)}，已通知 VIP Group")
+                                        else:
+                                            st.info("冇嘢改到，唔使通知。")
+                                        st.session_state[f"edit_{jid}"] = False
+                                        st.cache_data.clear()
+                                        st.rerun()
+                                    else:
+                                        st.error(f"修改失敗：{changed_e}")
     with tabs[2]:
         st.subheader("📤 上傳Order (自動通知WhatsApp)")
-        up_file = st.file_uploader("📤 上傳Excel", type=["xlsx"], key="v47_excel_uploader")
+        up_file = st.file_uploader("📤 上傳Excel", type=["xlsx"], key="v48_excel_uploader")
         if up_file:
             try:
                 df_check = pd.read_excel(up_file, sheet_name=0, header=0, nrows=2)
@@ -769,7 +933,7 @@ if role in ["admin","op"]:
                 up_file.seek(0)
                 df_up = parse_company_export_template(up_file) if is_new_template else pd.read_excel(up_file, dtype=str).fillna("")
                 st.dataframe(df_up.head(20), use_container_width=True)
-                if st.button(f"✅ 確認批量建立 {len(df_up)} 單 + 發WhatsApp", type="primary", key="v47_excel_confirm"):
+                if st.button(f"✅ 確認批量建立 {len(df_up)} 單 + 發WhatsApp", type="primary", key="v48_excel_confirm"):
                     created=0; created_list=[]
                     for _, r in df_up.iterrows():
                         client = str(r.get("商戶名稱","") or r.get("Client",""))
@@ -785,7 +949,7 @@ if role in ["admin","op"]:
                     st.success(f"🎉 批量建立 {created} 單，已自動通知WhatsApp")
             except Exception as e:
                 st.error(f"Excel讀取失敗: {e}")
-        with st.form("v47_order_form_full"):
+        with st.form("v48_order_form_full"):
             order_date = st.date_input("📅 訂單日期", value=today_hk())
             colA, colB = st.columns(2)
             with colA:
@@ -814,6 +978,8 @@ pod_idx=3 if role in ["admin","op"] else 2
 with tabs[pod_idx]:
     st.subheader("📸 上傳POD - 自動通知")
     st.caption("💡 提示：影相嗰陣盡量企近啲、光啲，系統會自動壓縮到入到 Sheet 為止。")
+    if qr_job:
+        st.success(f"📷 QR 認到 {qr_job}，下面已經幫你揀好咗呢張單，唔使再搵。")
     my_jobs_for_pod = get_my_jobs(df_jobs) if role=="driver" else df_jobs
     if role in ["admin","op"] and not df_jobs.empty:
         active_all = df_jobs[df_jobs["Status"].astype(str).str.strip().str.upper().isin(["PENDING","ACCEPTED","IN TRANSIT","IN_TRANSIT"])]
@@ -822,7 +988,7 @@ with tabs[pod_idx]:
     if my_pool.empty:
         st.info("暫無可上傳 POD 嘅單")
     else:
-        search = st.text_input("🔍 搜尋 JobID / 客戶 / 地址 / InternalNo", placeholder="例如：JOB-1117、TSTN、客戶名...", key="v47_pod_search")
+        search = st.text_input("🔍 搜尋 JobID / 客戶 / 地址 / InternalNo", placeholder="例如：JOB-1117、TSTN、客戶名...", key="v48_pod_search")
         filtered_pool = my_pool.copy()
         if search.strip():
             s = search.strip().lower()
@@ -835,7 +1001,14 @@ with tabs[pod_idx]:
         options = filtered_pool.to_dict('records')
         labels = [format_job_option(r) for r in options]
         label_to_job = {format_job_option(r): r for r in options}
-        sel_label = st.selectbox("✅ 選擇要上傳 POD 嘅單（已按搜尋 Filter）", labels, key="v47_pod_jid_v2")
+        # QR 嚟嘅單，預設揀佢
+        default_idx = 0
+        if qr_job:
+            for _i, _o in enumerate(options):
+                if str(_o.get("JobID","")).strip() == qr_job:
+                    default_idx = _i
+                    break
+        sel_label = st.selectbox("✅ 選擇要上傳 POD 嘅單（已按搜尋 Filter）", labels, index=default_idx, key="v48_pod_jid_v2")
         sel_job = label_to_job.get(sel_label, options[0])
         jid = sel_job.get("JobID","")
         sel_client = sel_job.get('Client','')
@@ -845,11 +1018,11 @@ with tabs[pod_idx]:
             st.write(f"📍 {sel_job.get('From','')} → {sel_job.get('To','')}")
             st.write(f"🚚 司機：{sel_job.get('Driver','')} | 狀態：{sel_job.get('Status','')}")
             st.write(f"📦 貨物：{str(sel_job.get('CargoDetail',''))[:200]}")
-        pod_files = st.file_uploader("📷 拍照上傳POD（一次最多 3 張，系統會自動壓縮）", type=["jpg", "png", "jpeg"], accept_multiple_files=True, key="v47_pod_files_noform")
+        pod_files = st.file_uploader("📷 拍照上傳POD（一次最多 3 張，系統會自動壓縮）", type=["jpg", "png", "jpeg"], accept_multiple_files=True, key="v48_pod_files_noform")
         if pod_files and len(pod_files) > 3:
             st.warning("⚠️ 一次最多 3 張，系統只會上傳頭 3 張")
             pod_files = pod_files[:3]
-        if st.button("📤 上傳POD + 轉Delivered + 通知", type="primary", use_container_width=True, key="v47_pod_upload_noform"):
+        if st.button("📤 上傳POD + 轉Delivered + 通知", type="primary", use_container_width=True, key="v48_pod_upload_noform"):
             if not pod_files:
                 st.error("請先揀相, 揀完先再撳上傳")
             else:
@@ -883,10 +1056,10 @@ with tabs[expense_idx]:
         my_for_expense = get_my_jobs(df_jobs)
     if not my_for_expense.empty:
         exp_labels = [format_job_option(r) for _,r in my_for_expense.iterrows()]
-        sel_exp_label=st.selectbox("揀JobID", exp_labels, key="v47_exp_jid")
+        sel_exp_label=st.selectbox("揀JobID", exp_labels, key="v48_exp_jid")
         sel_exp_jid = sel_exp_label.split(" | ")[0]
         sel_exp_client = next((str(r.get("Client","")) for _,r in my_for_expense.iterrows() if str(r.get("JobID",""))==sel_exp_jid), "")
-        with st.form("v47_expense_form"):
+        with st.form("v48_expense_form"):
             amt_tunnel = st.number_input("隧道費", min_value=0.0, step=10.0)
             amt_parking = st.number_input("停車費", min_value=0.0, step=10.0)
             amt_other = st.number_input("其他", min_value=0.0, step=10.0)
@@ -920,7 +1093,7 @@ if role=="driver":
                 with st.container(border=True):
                     st.markdown(f"**{row.get('JobID','')}** | {row.get('Client','')} | {row.get('Status','')}")
                     st.caption(f"{row.get('From','')} -> {row.get('To','')} | 📅 {row.get('Date','')} {row.get('DeliveryTime','')}")
-        show_hist = st.checkbox("☑️ 顯示已完成歷史 (Delivered)", value=False, key="v47_show_hist")
+        show_hist = st.checkbox("☑️ 顯示已完成歷史 (Delivered)", value=False, key="v48_show_hist")
         if show_hist:
             if my_hist.empty:
                 st.info("暫無歷史")
@@ -939,14 +1112,14 @@ cost_idx = 5 if role in ["admin","op"] else None
 if cost_idx is not None:
     with tabs[cost_idx]:
         st.subheader("💵 每單費用 OrderCosts")
-        if st.button("🔄 重新同步", key="v47_sync_cost_btn", type="primary"):
+        if st.button("🔄 重新同步", key="v48_sync_cost_btn", type="primary"):
             sync_order_costs_sheet()
             st.rerun()
         df_cost=load_df("OrderCosts")
         if not df_cost.empty:
             st.dataframe(df_cost.sort_values(by="JobID",ascending=False), use_container_width=True, height=450)
     with tabs[6]:
-        st.subheader("📥 下載POD - V47.2")
+        st.subheader("📥 下載POD - V48")
         df_pods = load_df("PODs")
         if df_pods.empty:
             st.warning("無PODs")
@@ -959,7 +1132,7 @@ if cost_idx is not None:
             with c0:
                 pod_job_ids = sorted(df_merged["JobID"].dropna().unique().tolist())
                 job_options = ["全部 (唔 Filter)"] + [f"{j} | {df_merged[df_merged['JobID']==j].iloc[0].get('Client','')}" for j in pod_job_ids]
-                sel_pod_job = st.selectbox("🎯 揀邊張單嘅 POD（留空 = 全部）", job_options, key="v47_pod_dl_job")
+                sel_pod_job = st.selectbox("🎯 揀邊張單嘅 POD（留空 = 全部）", job_options, key="v48_pod_dl_job")
             with c1:
                 start_date = st.date_input("開始日期", value=today_hk() - datetime.timedelta(days=7))
             with c2:
@@ -967,7 +1140,7 @@ if cost_idx is not None:
             c3, c4 = st.columns(2)
             with c3:
                 driver_list = ["全部司機"] + sorted([d for d in df_merged["Driver"].dropna().unique().tolist() if str(d).strip()])
-                sel_driver = st.selectbox("👷 揀司機", driver_list, key="v47_pod_dl_driver")
+                sel_driver = st.selectbox("👷 揀司機", driver_list, key="v48_pod_dl_driver")
             with c4:
                 only_with_pod = st.checkbox("只顯示有 POD 嘅單", value=True)
             filtered = df_merged.copy()
@@ -983,7 +1156,7 @@ if cost_idx is not None:
             st.success(f"找到 {len(filtered)} 張POD" + (f"（單：{sel_pod_job}）" if sel_pod_job != "全部 (唔 Filter)" else ""))
             if not filtered.empty:
                 st.dataframe(filtered[["JobID","Client","Driver","Date","CreatedAt_HKT","FileName"]].head(50), use_container_width=True, height=250)
-                if st.button(f"📦 打包下載 {len(filtered)} 張ZIP", type="primary", key="v47_pod_dl_zip_btn"):
+                if st.button(f"📦 打包下載 {len(filtered)} 張ZIP", type="primary", key="v48_pod_dl_zip_btn"):
                     zip_buffer = io.BytesIO()
                     with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zipf:
                         for _, r in filtered.iterrows():
@@ -1015,12 +1188,10 @@ if role in ["admin","op"]:
             load_scan_boxes_from_sheet()
         except Exception as e:
             print(f"tongxing load fail {e}")
-        # ===== ✍️ 手動入曲奇數，取代 OCR =====
         st.markdown("### ✍️ 手動入曲奇數 (取代 OCR)")
         st.caption("睇住張 SGL 相，逐間打箱數，冇貨就留 0。撳掣會直接寫入 運輸總表 + 通行，唔經 OCR，唔會再估錯。入錯咗可以再入多次，會覆蓋返同一日嗰行。")
-        with st.form("manual_cookie_form_v472", clear_on_submit=False):
+        with st.form("manual_cookie_form_v48", clear_on_submit=False):
             manual_date = st.date_input("📅 送貨日期", value=today_hk() - datetime.timedelta(days=1), key="manual_cookie_date")
-            # 預設載入嗰日已有嘅數，等你唔使由頭打過
             ds_key = manual_date.strftime("%Y-%m-%d")
             existing_boxes = SCAN_BOXES.get(ds_key, {})
             if existing_boxes:
@@ -1029,7 +1200,7 @@ if role in ["admin","op"]:
             manual_boxes = {}
             for i, shop in enumerate(SCAN_SHOPS):
                 with cols_m[i % 6]:
-                    manual_boxes[shop] = st.number_input(shop, min_value=0, max_value=100, value=int(existing_boxes.get(shop, 0)), key=f"manual_v472_{shop}")
+                    manual_boxes[shop] = st.number_input(shop, min_value=0, max_value=100, value=int(existing_boxes.get(shop, 0)), key=f"manual_v48_{shop}")
             manual_total_preview = sum(manual_boxes.values())
             manual_fee_preview = sum(scan_cost_for(s, v)[1] for s, v in manual_boxes.items() if v)
             st.info(f"預覽：總箱數 {manual_total_preview} 箱 | 通行 ${manual_fee_preview}")
