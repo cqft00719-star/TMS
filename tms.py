@@ -222,7 +222,6 @@ def build_tongxing_excel_bytes():
     buf = io.BytesIO(); wb.save(buf); buf.seek(0)
     return buf.getvalue()
 
-# ===== V48: Group ID 已改做真 VIP Group =====
 EVO_BASE_URL = "https://evolution-api-production-5d91de27.up.railway.app"
 EVO_INSTANCE = "my WhatsApps"
 EVO_API_KEY = st.secrets["EVO_API_KEY"]
@@ -230,7 +229,6 @@ ULTRAMSG_GROUP_ID = "120363410834827562@g.us"
 MY_WHATSAPP = st.secrets.get("MY_WHATSAPP", "")
 DAILY_AUTO_HOUR = 17
 DAILY_AUTO_MINUTE = 0
-# QR 用：Streamlit Secrets 加 APP_URL = "https://你個-tms-網址"
 APP_URL = ""
 try:
     APP_URL = str(st.secrets.get("APP_URL", "")).strip()
@@ -238,14 +236,12 @@ except:
     APP_URL = ""
 
 def get_qr_url_for_job(jid):
-    # 如果有 APP_URL，QR Scan 會直接開 Apps 嗰張單；如果冇，就淨係編 JobID，司機 Scan 到都知係邊張單
     if APP_URL:
         base = APP_URL.rstrip("/")
         return f"{base}/?job={quote(str(jid).strip())}"
     return str(jid).strip()
 
 def make_qr_img_tag(jid, size=110):
-    # 唔依賴 qrcode library，用 qrserver 畫，Streamlit 唔使另外裝嘢
     data = quote(get_qr_url_for_job(jid))
     url = f"https://api.qrserver.com/v1/create-qr-code/?size={size}x{size}&data={data}"
     return url
@@ -334,7 +330,6 @@ def notify_expense(jid, driver, client, fee_dict, total):
     except Exception as e:
         st.error(f"WhatsApp 通知失敗: {e}")
 
-# ===== V48: 修改 Order 通知 =====
 def notify_order_edited(jid, client, operator_name, changed_fields):
     try:
         ch = "、".join(changed_fields) if changed_fields else "內容"
@@ -411,7 +406,6 @@ def write_daily_log(status):
 def check_and_auto_send_daily():
     return
 
-# ===== V48: 修改 Order - 直接寫返去同一行 =====
 def update_job_in_sheet(jid, new_vals, old_row_dict):
     try:
         ws = get_sh().worksheet("Jobs")
@@ -430,7 +424,6 @@ def update_job_in_sheet(jid, new_vals, old_row_dict):
             if str(new_v) != old_v:
                 changed.append(col_name)
                 ws.update_cell(row_no, headers.index(col_name)+1, str(new_v))
-        # 喺 Notes 加返修改紀錄，等之後有得追
         try:
             if changed and "Notes" in headers:
                 old_notes = str(old_row_dict.get("Notes", "") or "")
@@ -600,6 +593,7 @@ def ensure_sheets():
     add("通行",["Date"]+SCAN_SHOPS+["總數"])
     add("運輸總表",["Date"]+SCAN_SHOPS+["總箱數"])
 
+# ===== V48 FIX: QR 唔再用 absolute，改做左右排，唔遮資料 =====
 def printable_order_html(job):
     jid = job.get('JobID',''); internal = job.get('InternalNo',''); client = job.get('Client',''); zone = job.get('Zone','')
     from_addr = job.get('From',''); from_contact = job.get('From_Contact',''); from_phone = job.get('From_Phone',''); pickup = job.get('PickupTime','')
@@ -607,8 +601,8 @@ def printable_order_html(job):
     cargo = job.get('CargoDetail',''); notes = job.get('Notes','') or ""; date_str = job.get('Date','')
     expected = f"{date_str} {pickup}-{delivery}".strip() or delivery or pickup or date_str
     cargo_html = str(cargo).replace('\n','<br>') if cargo else ""
-    qr_url = make_qr_img_tag(jid, size=120)
-    return f"""<html><head><meta charset="utf-8"><title>Printable - {jid}</title><style>@media print {{.no-print {{ display:none; }} @page {{ margin:10mm; }} }} body{{font-family: "Microsoft JhengHei", Arial, sans-serif; font-size:13px;}}.page{{border:2px solid #000; max-width:830px; margin:10px auto; padding:18px 22px; position:relative;}} h1{{text-align:center; font-size:22px; margin:5px 0 8px 0;}}.subtitle{{text-align:center; font-size:12px; margin-bottom:12px; border-bottom:1px solid #999; padding-bottom:8px;}} table{{width:100%; border-collapse:collapse; margin:6px 0;}} td{{border:1px solid #000; padding:6px 8px;}}.label{{background:#f2f2f2; width:110px; font-weight:bold;}}.label2{{background:#f2f2f2; width:55px; font-weight:bold; text-align:center;}}.section{{font-size:15px; font-weight:bold; margin:14px 0 4px 0;}}.sign{{margin-top:18px; display:flex; justify-content:space-between; font-size:12px;}}.hint{{text-align:center; font-size:11px; color:#666; margin-top:10px;}}.qr-box{{position:absolute; top:14px; right:18px; text-align:center;}}.qr-box img{{width:110px; height:110px; border:1px solid #000;}}.qr-box div{{font-size:10px; font-weight:bold; margin-top:2px;}}</style></head><body><div class="page"><div class="qr-box"><img src="{qr_url}"><div>Scan 入單 / POD<br>{jid}</div></div><h1>🚚 運輸訂單 Transport Order</h1><div class="subtitle">JobID: {jid} | Internal: {internal} | 預計: {expected}</div><table><tr><td class="label">客戶 Client</td><td>{client}</td><td class="label2">Zone</td><td style="width:130px;">{zone}</td></tr></table><div class="section">📦 起點 Pickup</div><table><tr><td class="label">地址 From</td><td colspan="3">{from_addr}</td></tr><tr><td class="label">聯絡人</td><td>{from_contact}</td><td class="label2">電話</td><td style="width:150px;">{from_phone}</td></tr><tr><td class="label">提貨時間</td><td colspan="3">{pickup}</td></tr></table><div class="section">🏁 終點 Delivery</div><table><tr><td class="label">地址 To</td><td colspan="3">{to_addr}</td></tr><tr><td class="label">聯絡人</td><td>{to_contact}</td><td class="label2">電話</td><td style="width:150px;">{to_phone}</td></tr><tr><td class="label">送貨時間</td><td colspan="3">{delivery}</td></tr></table><div class="section">📋 貨物資料 Cargo</div><table><tr><td class="label">詳細明細</td><td>{cargo_html}</td></tr><tr><td class="label">備註</td><td>{notes}</td></tr></table><div class="sign"><div>司機簽收: __________________</div><div>客戶簽收: __________________</div><div>日期: {date_str}</div></div></div><div class="hint no-print"><button onclick="window.print()" style="margin-top:10px; padding:10px 22px; font-size:15px;">🖨️ 打印 / Save as PDF</button></div></body></html>"""
+    qr_url = make_qr_img_tag(jid, size=110)
+    return f"""<html><head><meta charset="utf-8"><title>Printable - {jid}</title><style>@media print {{.no-print {{ display:none; }} @page {{ margin:10mm; }} }} body{{font-family: "Microsoft JhengHei", Arial, sans-serif; font-size:13px;}}.page{{border:2px solid #000; max-width:830px; margin:10px auto; padding:18px 22px;}} h1{{text-align:center; font-size:22px; margin:5px 0 8px 0;}}.subtitle{{text-align:center; font-size:12px; margin-bottom:12px; border-bottom:1px solid #999; padding-bottom:8px;}} table{{width:100%; border-collapse:collapse; margin:6px 0;}} td{{border:1px solid #000; padding:6px 8px;}}.label{{background:#f2f2f2; width:110px; font-weight:bold;}}.label2{{background:#f2f2f2; width:55px; font-weight:bold; text-align:center;}}.section{{font-size:15px; font-weight:bold; margin:14px 0 4px 0;}}.sign{{margin-top:18px; display:flex; justify-content:space-between; font-size:12px;}}.hint{{text-align:center; font-size:11px; color:#666; margin-top:10px;}}.top-row{{display:flex; justify-content:space-between; align-items:flex-start; gap:12px;}}.top-left{{flex:1;}}.qr-box{{text-align:center; flex-shrink:0;}}.qr-box img{{width:100px; height:100px; border:1px solid #000;}}.qr-box div{{font-size:10px; font-weight:bold; margin-top:2px; line-height:1.3;}}</style></head><body><div class="page"><div class="top-row"><div class="top-left"><h1 style="text-align:left; margin:0;">🚚 運輸訂單 Transport Order</h1><div style="font-size:12px; margin-top:6px;">JobID: {jid}<br>Internal: {internal}<br>預計: {expected}</div></div><div class="qr-box"><img src="{qr_url}"><div>Scan 入單 / POD<br>{jid}</div></div></div><table><tr><td class="label">客戶 Client</td><td>{client}</td><td class="label2">Zone</td><td style="width:130px;">{zone}</td></tr></table><div class="section">📦 起點 Pickup</div><table><tr><td class="label">地址 From</td><td colspan="3">{from_addr}</td></tr><tr><td class="label">聯絡人</td><td>{from_contact}</td><td class="label2">電話</td><td style="width:150px;">{from_phone}</td></tr><tr><td class="label">提貨時間</td><td colspan="3">{pickup}</td></tr></table><div class="section">🏁 終點 Delivery</div><table><tr><td class="label">地址 To</td><td colspan="3">{to_addr}</td></tr><tr><td class="label">聯絡人</td><td>{to_contact}</td><td class="label2">電話</td><td style="width:150px;">{to_phone}</td></tr><tr><td class="label">送貨時間</td><td colspan="3">{delivery}</td></tr></table><div class="section">📋 貨物資料 Cargo</div><table><tr><td class="label">詳細明細</td><td>{cargo_html}</td></tr><tr><td class="label">備註</td><td>{notes}</td></tr></table><div class="sign"><div>司機簽收: __________________</div><div>客戶簽收: __________________</div><div>日期: {date_str}</div></div></div><div class="hint no-print"><button onclick="window.print()" style="margin-top:10px; padding:10px 22px; font-size:15px;">🖨️ 打印 / Save as PDF</button></div></body></html>"""
 def format_job_option(row):
     jid=str(row.get("JobID","")); client=str(row.get("Client",""))[:15]; internal=str(row.get("InternalNo","")); date=str(row.get("Date",""))[:10]; delivery=str(row.get("DeliveryTime",""))
     return f"{jid} | {client} | {internal} | {date} {delivery}".strip()
@@ -650,11 +644,9 @@ user=st.session_state.user
 role=str(user.get("role","driver")).lower()
 operator=user.get("username","")
 op_name=user.get("name","")
-# ===== V48: QR Scan 入嚟，記低個 JobID =====
 qr_job = ""
 try:
     qr_job = str(st.query_params.get("job", "") or "").strip()
-    # 有啲 QR 會帶 TMS:JOB-xxx 或者成條 link，抽返個 JOB- 出嚟
     if qr_job and "JOB-" in qr_job.upper():
         import re as _re
         _m = _re.search(r"JOB-[A-Z0-9\-]+", qr_job.upper())
@@ -732,7 +724,6 @@ def get_my_history_jobs(df):
 with tabs[0]:
     if role=="driver":
         st.subheader("🟢 可接任務池")
-        # QR 嚟嘅單，置頂 show
         if qr_job and not df_jobs.empty:
             qr_row = df_jobs[df_jobs["JobID"].astype(str).str.strip() == qr_job]
             if not qr_row.empty:
@@ -853,7 +844,6 @@ if role in ["admin","op"]:
         if df_jobs.empty:
             st.info("無任務")
         else:
-            # QR 嚟嘅單排最前
             df_sorted = df_jobs.sort_values(by="JobID",ascending=False)
             if qr_job:
                 df_sorted = pd.concat([df_sorted[df_sorted["JobID"].astype(str).str.strip()==qr_job], df_sorted[df_sorted["JobID"].astype(str).str.strip()!=qr_job]])
@@ -872,7 +862,6 @@ if role in ["admin","op"]:
                             st.session_state[f"edit_{jid}"] = True
                     if st.session_state.get(f"print_{jid}"):
                         st.components.v1.html(printable_order_html(row.to_dict()), height=750, scrolling=True)
-                    # ===== 修改 Form =====
                     if st.session_state.get(f"edit_{jid}"):
                         if str(row.get("Status","")).strip().upper() == "DELIVERED":
                             st.warning(f"⚠️ {jid} 已經 Delivered，唔俾喺度改。如真係要改，請去 Google Sheet 直接改，或者開張新單。")
@@ -1001,7 +990,6 @@ with tabs[pod_idx]:
         options = filtered_pool.to_dict('records')
         labels = [format_job_option(r) for r in options]
         label_to_job = {format_job_option(r): r for r in options}
-        # QR 嚟嘅單，預設揀佢
         default_idx = 0
         if qr_job:
             for _i, _o in enumerate(options):
